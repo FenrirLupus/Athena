@@ -1,8 +1,9 @@
 # DOCTRINE — Athena Architecture
 
 Board doctrine for the Athena Architecture project (Athena-Agent). Stated by
-the board on 2026-09-28 (FEN-34, comments 8dbcc240, a11c0427 and 0d9c36bf)
-and made durable here so the doctrine lives where the project lives.
+the board on 2026-09-28 (FEN-34, comments 8dbcc240, a11c0427, 0d9c36bf and
+631a0d8e) and made durable here so the doctrine lives where the project
+lives.
 
 ## The doctrine
 
@@ -99,26 +100,37 @@ and without leaving any comment or reference behind.
 
 ## Honeycomb — our own system harness
 
-`.athena/honeycomb` is where our adapted system harness lives — our own
-version of a paperclip-like control plane, organized and operating
-differently.
+Honeycomb is **its own top-level application** — a separate system harness
+that installs as its own dot-directory `.honeycomb`, with its files housed
+at `.honeycomb/honeycomb`. It does not live inside `.athena`.
 
-- **Local First and open source.** Portable within the `.athena` directory,
-  it lets Athena run her agents like a Queen Bee in a beehive:
-  organizational operations similar to the public harness, but native,
-  local, and owner-controlled.
-- Honeycomb ships packaged with Athena for now. The board created a
-  dedicated Honeycomb GitHub repo on 2026-09-28 (FEN-34, 13:00Z), so the
-  two projects are split from the start — honeycomb lives and commits
-  directly in its own repo, and there is no history-moving split to do later.
+- **Two separate apps on a local machine:** `.athena/athena-agent` (Athena
+  Agent) and `.honeycomb/honeycomb` (Honeycomb) — a deliberate split from
+  the start, a Queen Bee harness beside the agents it runs.
+- **Cross-platform operation between the two.** Honeycomb talks to the
+  agents through the Athena Agent gateway services, driving each agent
+  directly from an **Idle** state into an active state such as **Read,
+  Write, Modify, Delete, List, Search**, etc.
+- **Local First and open source.** It lets Athena run her agents like a
+  Queen Bee in a beehive — organizational operations native, local, and
+  owner-controlled — and it is shareable as a local system harness for
+  anyone's agents.
+- Honeycomb keeps its **own dedicated GitHub repo** (created by the board
+  on 2026-09-28, FEN-34 13:00Z), split from the Athena-Agent repo from the
+  start — honeycomb lives and commits directly in its own repo, and there
+  is no history-moving split to do later.
 
-### Board's direction (verbatim)
+### Board's direction (verbatim; placement corrected 2026-09-28T13:28Z)
 
-> in the .athena directory within a subfolder called honeycomb that
-> subfolder is where the adapted paperclip code will go as we will have our
-> own version of paperclip but organized and operating differently ...
-> Local First and Opensource so that Those Who want a Local System Harness
-> for their Agents can do so Easily
+> ... i want honeycomb to be installed separately such as .honeycomb and
+> that it has it's files within .honeycomb/honeycomb yknow? this way they
+> are 2 separate apps BUT with cross-platform operation yknow? as honeycomb
+> would use the athena agent gateway services to talk to the agents
+> directly having them go from Idle to switch to other states such as:
+> Read, Write, Modify, Delete, List, Search, etc yknow?
+
+This 13:28Z ruling supersedes the earlier 12:56Z wording that placed
+honeycomb inside `.athena`; that earlier wording is not in force.
 
 ## The three-layer model
 
@@ -147,14 +159,19 @@ Every AI program and architecture consists of three layers:
   Discord; ours has those too, plus a **built-in website GUI** that any user
   can use immediately.
 
-## Repo layout for Athena-Agent
+## Repo layout — two separate top-level apps
 
 - The Athena GitHub repo uses the folder name **athena-agent**
-  (upload-friendly), replacing the current `athena-system` naming, and the
-  honeycomb project sits beside it as **its own separate repo** (board
-  decision 2026-09-28, 13:00Z; no sibling-folder history split is needed).
-- Each subfolder is a packaged app; the repo root holds cross-platform
-  operations for installing athena-agent or honeycomb respectively.
+  (upload-friendly), replacing the current `athena-system` naming.
+- Honeycomb is **its own separate GitHub repo** (created by the board,
+  2026-09-28, 13:00Z) — not a sibling folder inside the Athena-Agent repo,
+  so no sibling-folder history split is needed.
+- Each repo is a packaged app with cross-platform installers in its own
+  repo root. On a local machine the two apps install **separately**: Athena
+  Agent at `~/.athena/athena-agent`, and Honeycomb as its own app at
+  `~/.honeycomb/honeycomb`. They interoperate cross-platform via the Athena
+  Agent gateway services, which drive each agent from Idle into active
+  states such as Read, Write, Modify, Delete, List, Search.
 - Renaming and restructuring the local tree is prep work, done reversibly
   (1:1 with a per-item manifest), never breaking the parked app's runtime
   paths.
