@@ -1,8 +1,8 @@
 # DOCTRINE — Athena Architecture
 
 Board doctrine for the Athena Architecture project (Athena-Agent). Stated by
-the board on 2026-09-28 (FEN-34, comment 8dbcc240) and made durable here so the
-doctrine lives where the project lives.
+the board on 2026-09-28 (FEN-34, comments 8dbcc240 and a11c0427) and made
+durable here so the doctrine lives where the project lives.
 
 ## The doctrine
 
@@ -31,6 +31,46 @@ doctrine lives where the project lives.
 - Hermes keeps its Intelligence First character; Athena's is complementary,
   not a copy.
 
+## GitHub handling and release versioning (board doctrine)
+
+One board ruling binds every repo the company touches, and binds the
+Athena-Agent repo especially:
+
+- **Hermes alone** performs GitHub repo updates and downloads — push and
+  pull — and only **when applicable and necessary** based on current
+  information, never on reflex or routine. No other agent pushes or pulls on
+  the company's repos.
+
+Athena-Agent's releases follow its own versioning schema:
+
+- **Alpha** — new features work, but in an unstable manner, with known
+  issues.
+- **Beta** — those new features work in a stable manner, with minimal
+  issues.
+- **Stable** — all features work, stability is in place, **no regressions**;
+  strictly additive features and functions, never a loss of behavior.
+
+### Board's direction (verbatim)
+
+> thank you and also to provide additional information, hermes YOU are the
+> only one who should handle github repo updates or downloads accordingly
+> such as only push or pull based on applicable and necessary information
+> and that especially IF updating the Athena-Agent Repo right? only push an
+> update to the repo following it's applicable versioning schema AND If it
+> is necessary to push an update such as Ideally an alpha update consists of
+> new features that are working in a unstable manner with some issues
+> meanwhile a beta release has those new features working in a stable manner
+> with minimal issue and then a stable release has all features working and
+> stability is in place with NO regressions to features only additive
+> features and functions understand?
+
+### This doctrine does not authorize a push
+
+The GitHub-handling and versioning rules govern how releases are labeled and
+gated **when a push is authorized**. They do not themselves authorize any
+push or upload. Board approval plus a cleared upload-safety gate remain the
+only paths to a push or upload (below).
+
 ## Safety rulings (in force)
 
 Two board rulings bind how this project is handled:
@@ -41,11 +81,13 @@ Two board rulings bind how this project is handled:
 2. **The upload-safety gate stands (FEN-90).** No git push and no upload of
    Athena-Agent without board approval. The doctor's gate — 11 fail / 3 warn
    must clear in a controlled post-park run — must pass before any upload is
-   permitted.
+   permitted. The release-versioning doctrine above labels and gates releases
+   once a push is authorized; it does not itself authorize a push or upload.
 
 ### Unchanged rails
 
-- The `x.x.x` versioning schema stays as the updater's key; the working tree
-  keeps read-first discipline (FEN-90).
+- The `x.x.x` versioning schema stays as the updater's key — alpha `0.0.x`,
+  beta `0.x.0`, stable `x.0.0`, single source `core/config.py` VERSION
+  (FEN-90); the working tree keeps read-first discipline.
 - `hermes-gateway-athena.service` (associate Athena's live gateway) is
   unaffected and stays up.
