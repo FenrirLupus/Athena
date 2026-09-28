@@ -130,6 +130,5 @@ def suggested_model(name: str) -> str:
         "minimax": "minimax-text-01",
         "cohere": "command-r-plus",
         "perplexity": "sonar",
-        "nous": "nous-hermes-4",
     }
     return suggestions.get(name, "")

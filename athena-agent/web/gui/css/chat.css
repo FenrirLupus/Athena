@@ -129,8 +129,8 @@
   font-family: inherit;
 }
 #chat-input:focus { outline: none; border-color: var(--tertiary); }
-/* The ICON buttons (the Operator's 08-12 chat spec): the Attachments
-   paperclip + the Mic placeholder sit NEXT to the input, before Send. */
+/* The ICON buttons (the Operator's 08-12 chat spec): the Attach
+   icon + the Mic placeholder sit NEXT to the input, before Send. */
 .chat-icon-btn {
   flex: none; background: var(--secondary); border: 1px solid var(--line);
   color: var(--font); border-radius: 10px; padding: 8px 12px;

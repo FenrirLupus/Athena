@@ -12,7 +12,7 @@ what matters and learn as she works.
 
 ## 🚀 Install
 
-The code lives in `athena-system/`. Athena **always** installs into a fresh
+The code lives in `athena-agent/`. Athena **always** installs into a fresh
 `.athena` folder in *your* home directory (Linux: `~/.athena` · Windows:
 `%USERPROFILE%\.athena`).
 
@@ -21,7 +21,7 @@ The code lives in `athena-system/`. Athena **always** installs into a fresh
 > ✱ **Linux is the PRIMARY tested version.**
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/FenrirLupus/Athena-Agent/main/athena-system/install.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/FenrirLupus/Athena-Agent/main/athena-agent/install.sh)
 ```
 
 ### Windows Install
@@ -29,7 +29,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/FenrirLupus/Athena-Agent/mai
 > ✱ **Windows is the SECONDARY tested version.**
 
 ```powershell
-powershell -Command "Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/FenrirLupus/Athena-Agent/main/athena-system/install.bat' -OutFile install.bat; .\install.bat"
+powershell -Command "Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/FenrirLupus/Athena-Agent/main/athena-agent/install.bat' -OutFile install.bat; .\install.bat"
 ```
 
 > **Note on testing:** everything here is *vibe coded* — Athena Herself is

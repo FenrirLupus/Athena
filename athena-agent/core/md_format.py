@@ -238,7 +238,7 @@ def _skip(path: Path, root: Path, excluded: tuple) -> bool:
 
 def format_tree(root: Path | None = None,
                 excluded: tuple = ("pycache", "readme", "documentation",
-                                   ".hermes", "node_modules", ".wiki",
+                                   ".athena", "node_modules", ".wiki",
                                    "logs-archive")) -> dict:
     """Format every Standard-schema .md under a root.
 

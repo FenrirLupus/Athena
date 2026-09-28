@@ -259,7 +259,7 @@ def fix() -> None:
         # skills + the built-in tools.
         format_profile_files()
         format_tree(ATHENA_ROOT / "skills",
-                    excluded=("pycache", "readme", "documentation", ".hermes",
+                    excluded=("pycache", "readme", "documentation", ".athena",
                               "node_modules"))
         format_tree(ATHENA_ROOT / "athena-system" / "tools",
                     excluded=("pycache", "readme", "documentation",
