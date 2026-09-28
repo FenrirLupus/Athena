@@ -74,7 +74,9 @@ athena web    # the GUI server
 | **Beta** | Some bugs, little polish, slightly capable, medium durability | `0.1.0` |
 | **Alpha** | Lots of bugs, little polish, low durability | `0.0.1` |
 
-**Example versioning:** `1.1.1` = the `0.1` Alpha within the `1.1` Beta of the `1.0` Stable release.
+**Example versioning:** `1.0.0` = stable, `0.2.0` = beta, `0.0.2` = alpha — the
+tier is read from the string alone: first digit non-zero → Stable, second digit
+non-zero → Beta, patch-only → Alpha.
 
 ---
 
