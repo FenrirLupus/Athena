@@ -14,61 +14,63 @@ Newest first. One line per change; the reason follows an em dash when the reason
 
 ## 0.0.2 — alpha (in progress, not released)
 
-Comparison base: `0.0.1`, which is what the `latest` branch carries. Measured, not recalled — diffing the working tree
-against `git archive origin/latest` gives **4 modified files, 0 added, 0 removed** outside runtime state. The command
-that produces that list is in `documentation/architecture/39-branches-and-channels.md`; if it disagrees with this
-section, this section is wrong.
+Comparison base: `0.0.1`, which is what the `latest` branch carries. **Measured, not recalled** — `git diff
+--name-status origin/latest..origin/alpha-0.0.2` is the authority:
 
-`+` `server/ledger_view.py` + `tests/ledger_view_check.py` (14 checks) — one ordered reader over the ledger: oldest
-first, cursor that never repeats, corrupt rows skipped **and counted**, and a two-source timeline in which turn rows
-(ISO `ts`) and ledger rows (unix `at`) are merged on one numeric key. `GET /security/events` now delegates to it, so the
-module has a producer rather than existing as an unused abstraction
-`+` `[data-theme="light"]` in `palette.css` — all 49 tokens have a light counterpart, including the state colours and
-the approval-dialog edges, so no token silently keeps a dark value in light mode
-`+` `web/js/theme.js` — the theme attribute is set before the first stylesheet applies (no flash of the wrong theme);
-the choice lives in `localStorage`, no cookie and no server round trip. Loaded as the first element of `<head>` on all
-four pages, with a `#theme-toggle` control
-`+` header `#global-header` → `#topbar`, and the footer reordered to **version · context · terminal** with a `.ctx-bar`
-progress element and a `#terminal-open` button replacing the three bare api links
-`#` verified live: `--bg` `#0e1014` → `#f6f7f9` on toggle, `--ok` `#1c7a46`, `--bad` `#b3261e`; `theme.js` is the first
-`<head>` child; footer order `version, ctx, tools` on all four served pages; 0 colour literals reintroduced
-`#` not yet live: the `.ctx-bar` has no producer (it is filled by the footer pass), and `#terminal-open` has no overlay
-until the terminal is built — both are controls without their behaviour until those steps land
+```text
+9 added · 27 modified · 0 deleted · +1700 / -288 lines
+```
 
-`+` `web/css/palette.css` — every colour the interface uses, in one file; the dark values are the original literals
-verbatim, so nothing that renders changed value. 49 tokens: 18 moved out of `global.css`, 31 for surfaces and edges
-that existed only as literals inside a rule (`--state-*` for the rail and dot states, `--ok-edge`, `--warn-tint`,
-`--veil`, `--shadow`, `--chip-line`, …)
-`+` the literal sweep — `global.css` and `page.css` carry **zero** hex and zero `rgba()` values; three
-`var(--token, #literal)` fallbacks collapsed to the token alone, since a fallback for a token defined in a
-first-loaded sheet cannot fire
-`+` `GET /security/events` — ledger rows newer than `since`, oldest first, with the newest `at` as the cursor; declared
-above the static mount, so it is reachable. Read-only by construction
-`+` `tool_call_id` on every `role: "tool"` row of `GET /agents/{ref}/messages` — the projection named the tool but not
-the call it answered
+If the diff disagrees with this section, this section is wrong.
 
-`#` verified: `/security/events` → 401 without the token, 30 rows with it, 0 rows for a future cursor, `since=<cursor>`
-→ 0 rows, `since=-5` → 400; 80 of 80 tool rows carry `tool_call_id`
-`#` verified: palette resolves in the browser (`--state-working` → `rgb(96, 165, 250)`) with the three stylesheets
-loading in order `palette.css, global.css, page.css` on all four pages
-`+` `tests/ui_snapshot_check.py` — `--allow-added`: declarations that did not exist before are dropped from the
-difference count, so a new rule no longer reads as a regression while a removed or changed one still does
-`+` `tests/selftest.py` — the snapshot gate runs with `--allow-added`; the flag and the wiring land in the same step,
-because a flag nothing passes is a setting, not a gate
-`#` verified both directions: an added `.pill{outline-color:…}` prints `+ page.css|.pill|outline-color` and `differ 0`
-with the flag; changing a real literal (`#4ade80` → `#010203`) prints `differ 1` and `SELFTEST FAIL`; restoring gives
-`differ 0`
+### Added
 
-`-` `/config` dropped `model.max_output_tokens` — the redaction matched any key *containing* `token`, so a setting the
-settings page displays was removed along with the secrets. The rule is now exact names (`token`, `secret`, `api_token`,
-…) plus `_token`/`_secret`/`_password`/`_api_key`/`_passphrase` suffixes. Verified: the route returns
-`max_output_tokens: 512` and still strips `security.network.api_token`. Found by a reviewer checking the design against
-the tree, in code that had already been called done.
+`+` `core/context_window.py` — the window is two facts: `context_window_local` (floor and fallback, minimum 32768) and
+`context_window_provider` (the figure a provider publishes). The published figure has priority, applies only to the
+model it was published for (`context_window_provider_model`), and is written into the config when adopted
+`+` `web/css/palette.css` — every colour in one file, dark values verbatim, plus a `[data-theme="light"]` block with a
+counterpart for all 49 tokens; both stylesheets now carry **zero** colour literals
+`+` `web/js/theme.js` — theme set before the first stylesheet applies, `localStorage` only, driven by the footer switch
+`+` `web/js/terminal.js` — the server's operations in a full-window overlay: ledger events, seven local commands,
+autocomplete, `Esc` to close
+`+` `web/js/page-specs.js` — the page structures derived from the markup that already exists (settings sections from
+`.block`, first-run guide when a lane has no turns)
+`+` `server/ledger_view.py` + `tests/ledger_view_check.py` — one ordered reader over the security ledger, with a cursor
+that never repeats and corrupt rows counted rather than hidden
+`+` `tests/context_window_check.py` — 10 checks: provider priority, below-floor refusal, legacy `window` key
+`+` `CHANGELOG.md` — this file
 
-`#` `VERSION` (root and `athena-agent/`) reads `0.0.2`
-`#` pending in this version: the website plan steps 2–9 (`documentation/proposals/website/design-r7.md`) — palette and
-literal sweep, `ledger_view`, `/security/events`, `theme.js`, topbar and footer, `live.js` additions, `terminal.js`,
-page specs, browser pass
+### Fixed
+
+`-` **the published figure leaked into every lane** — stored installation-wide, so a local 32K model inherited the 1M
+figure published for a remote one and sized its stack at 1M. It is now scoped to the model it was published for
+`-` **three key lists silently dropped the new settings** — the writer's values tuple, `as_cfg`'s copy list, and the
+in-code defaults; any one of them made the setting look supported and behave as absent
+`-` `/config` redaction matched any key *containing* `token`, removing `model.max_output_tokens`; the rule is exact names
+plus `_token`/`_secret` suffixes
+`-` `resources` sized every lane from the installation's model block, so the panel disagreed with the turn it described
+`-` `effective_window()` swallowed a below-floor `ValueError` and quietly returned the floor; it now says so
+`-` the release gate printed `GATE: FAIL` with no failing suite and exited 0 — it now names the suite, its exit code and
+its last twelve lines, and exits non-zero
+`-` chat: the Thread/Resources switch had been removed with the page header; sleep/wake status wrote to a deleted
+element; `createLane` was unreachable dead code
+`-` `/security/events` 500'd on its first real call (`json` was never imported) and `/attach` accepted `..`
+
+### Changed
+
+`#` layout is eight layers — site header 5%, navbar 5%, body, footer 5% of the window, with page bands as percentages
+of the body band; chat divides its body 25/75 and its footer into three columns with 3:1 buttons
+`#` the version is read from `VERSION` and the channel derived from its digits; `/health` reports `window` *and*
+`window_source`, so a figure can be read with its provenance
+`#` nothing is pushed to `latest`; this branch is the alpha line and it folds upward only when it has been through beta
+
+### Files
+
+```text
+added     .gitignore, core/context_window.py, server/ledger_view.py, tests/context_window_check.py, tests/ledger_view_check.py, web/css/palette.css, web/js/page-specs.js, web/js/terminal.js, web/js/theme.js
+
+modified  VERSION, CHANGELOG.md, VERSION, cli/__main__.py, config/defaults.yaml, config/loader.py, context/digest.py, context/stack.py, core/agentconfig.py, core/loop.py, core/providerregistry.py, providers/local.py, server/app.py, server/channels.py, server/lifecycle.py, tests/run_gate.sh, tests/selftest.py, tests/ui_snapshot_check.py, web/css/global.css, web/css/page.css, web/html/chat.html, web/html/new-agent.html, web/html/settings.html, web/index.html, web/js/app.js, web/js/live.js, web/js/wizard.js
+```
 
 ---
 
