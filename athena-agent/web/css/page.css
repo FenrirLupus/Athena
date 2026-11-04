@@ -473,9 +473,14 @@ body:not([data-layout="app"]) #page-footer {
   border-radius: 12px;
   font-size: 15px;
   line-height: 1;
+  /* the same fill as Send: two buttons in one composer should not look like different kinds of control */
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--bg);
 }
-
-.btn-attach.has-files { border-color: var(--accent); color: var(--accent); }
+.btn-attach:hover { background: var(--btn-hover); }
+/* attached files read as a ring, because the fill is already the accent */
+.btn-attach.has-files { box-shadow: inset 0 0 0 2px var(--bg); }
 
 .attach-list {
   list-style: none;
@@ -794,7 +799,7 @@ body:not([data-layout="app"]) #page-footer {
 }
 .term-veil[hidden] { display: none; }
 .term-sheet {
-  width: min(880px, 92vw); height: min(560px, 82vh);
+  width: 80vw; height: 90vh;
   display: flex; flex-direction: column;
   background: var(--panel); border: 1px solid var(--line);
   border-radius: 8px; box-shadow: 0 16px 44px var(--shadow);
@@ -871,7 +876,8 @@ html, body { height: 100%; }
 body {
   display: grid; grid-template-rows: 5% 5% minmax(0, 1fr) minmax(5%, auto); min-height: 0;
 }
-#topbar, nav.global-nav { min-height: 0; height: 100%; overflow: hidden; }
+#topbar { min-height: 0; height: 100%; overflow: hidden; }
+nav.global-nav { min-height: 0; height: 100%; overflow: visible; }   /* the bell's panel hangs below it */
 #global-footer { min-height: 0; height: 100%; display: flex; align-items: center; }
 #global-body { min-height: 0; overflow: hidden; }
 #topbar { height: 100%; padding: 0 1.25%; }
@@ -919,6 +925,7 @@ body[data-page="chat"] form.composer > textarea { min-width: 0; width: 100%; max
 
 /* the navbar: pages on the left, notifications and the account on the right */
 nav.global-nav {
+  width: 100%; max-width: 100%; margin: 0; box-sizing: border-box;
   display: grid; grid-template-columns: 1fr auto; align-items: center;
   gap: 12px; padding: 0 1.25%; min-height: 0;
 }
@@ -989,4 +996,655 @@ nav.global-nav .nav-link { white-space: nowrap; }
 .panel-tabs .tab { font-size: 12px; }
 /* the panels fill what is left, and shrink rather than overflowing the clipped container */
 .panels { display: flex; flex-direction: column; min-height: 0; }
-.panel { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
+/* the panel clips; the conversation inside it owns the only scrollbar */
+.panel { flex: 1 1 auto; min-height: 0; overflow: hidden; display: flex; flex-direction: column; }
+
+/* ---- scrolling: the site fits the window, only the inner panels scroll ---- */
+html, body { overflow: hidden; }
+
+/* one scrollbar, in the site's own colours */
+.thread-scroll, .rail-list, .term-log, .sidenav, .section-panels {
+  scrollbar-width: thin;
+  scrollbar-color: var(--line) transparent;
+}
+.thread-scroll::-webkit-scrollbar,
+.rail-list::-webkit-scrollbar,
+.term-log::-webkit-scrollbar { width: 10px; height: 10px; }
+.thread-scroll::-webkit-scrollbar-track,
+.rail-list::-webkit-scrollbar-track,
+.term-log::-webkit-scrollbar-track { background: transparent; }
+.thread-scroll::-webkit-scrollbar-thumb,
+.rail-list::-webkit-scrollbar-thumb,
+.term-log::-webkit-scrollbar-thumb {
+  background: var(--line); border-radius: 999px;
+  border: 3px solid transparent; background-clip: content-box;
+}
+.thread-scroll::-webkit-scrollbar-thumb:hover,
+.rail-list::-webkit-scrollbar-thumb:hover,
+.term-log::-webkit-scrollbar-thumb:hover { background: var(--muted); background-clip: content-box; }
+
+/* the window never scrolls; a page whose content is taller than its band scrolls inside that band.
+   chat is excluded because its thread already owns the only scrollbar on the page. */
+html, body { height: 100%; overflow: hidden; }
+body:not([data-page="chat"]) #page-body {
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--line) transparent;
+}
+body:not([data-page="chat"]) #page-body::-webkit-scrollbar { width: 10px; }
+body:not([data-page="chat"]) #page-body::-webkit-scrollbar-track { background: transparent; }
+body:not([data-page="chat"]) #page-body::-webkit-scrollbar-thumb {
+  background: var(--line); border-radius: 999px; border: 3px solid transparent; background-clip: content-box;
+}
+
+/* home spans the window like every other band; the old centred measure is retired */
+body[data-page="home"] #page-body {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+  gap: 16px; align-content: start;
+  width: 100%; max-width: 100%; padding: 1% 1.5%; overflow-y: auto;
+}
+body[data-page="home"] #page-body .page-col { width: 100%; max-width: 100%; margin: 0; padding: 0; }
+
+/* the notification centre, anchored under the bell */
+nav.global-nav .nav-tools { position: relative; }
+.notif-panel {
+  position: absolute; top: calc(100% + 8px); right: 0; z-index: 50;
+  /* sized as a share of the window: a fifth of the width, two thirds of the height */
+  width: 20vw; height: 66vh; max-height: 66vh;
+  display: flex; flex-direction: column;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+  box-shadow: 0 16px 44px var(--shadow);
+}
+.notif-panel[hidden] { display: none; }
+.notif-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 8px 10px; border-bottom: 1px solid var(--line);
+  font-size: 11.5px; color: var(--muted); letter-spacing: .04em; text-transform: uppercase;
+}
+.notif-clear { background: none; border: 0; color: var(--muted); font-size: 16px; line-height: 1; cursor: pointer; }
+.notif-list { list-style: none; margin: 0; padding: 6px; overflow-y: auto; min-height: 0; }
+.notif-row { display: grid; grid-template-columns: 54px minmax(0, 1fr); gap: 6px; padding: 5px 6px; border-radius: 4px; }
+.notif-row:hover { background: var(--panel-2); }
+.notif-kind { font-size: 10px; text-transform: uppercase; color: var(--muted); }
+/* the three outcomes, in the site's own status language */
+.notif-warning  { border-left: 2px solid var(--warn); }
+.notif-caution  { border-left: 2px solid var(--caution); }
+.notif-critical { border-left: 2px solid var(--bad); }
+.notif-warning  .notif-kind { color: var(--warn); }
+.notif-caution  .notif-kind { color: var(--caution); }
+.notif-critical .notif-kind { color: var(--bad); }
+.notif-title { font-size: 12px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.notif-detail { grid-column: 2; font-size: 11px; color: var(--dim); }
+/* the icon fills its button */
+nav.global-nav .nav-icon svg { width: 100%; height: 100%; display: block; }
+
+/* unread: a 12.5px ring with a red dot inside it */
+#bell[data-unread]:not([data-unread=""]):not([data-unread="0"])::after {
+  content: ""; position: absolute; top: -3px; right: -3px;
+  width: 12.5px; height: 12.5px; border-radius: 50%;
+  background: var(--panel); border: 1px solid var(--line);
+}
+#bell[data-unread]:not([data-unread=""]):not([data-unread="0"])::before {
+  content: ""; position: absolute; top: 2px; right: 2px; z-index: 1;
+  width: 6px; height: 6px; border-radius: 50%; background: var(--bad);
+}
+nav.global-nav .nav-icon { position: relative; }
+
+/* the content area spans the window; a band's own padding is its only inset */
+#global-body, #page-root { width: 100%; max-width: 100%; padding: 0; margin: 0; }
+
+/* read rows are quiet, unread ones carry the accent, and a swipe marks or deletes */
+.notif-row { touch-action: pan-y; user-select: none; cursor: grab; }
+.notif-row.notif-read { opacity: .5; }
+
+.notif-row.notif-swiping { transform: translateX(var(--swipe, 0)); transition: none; }
+.notif-row.notif-gone { opacity: 0; transform: translateX(60px) scale(.98); transition: opacity .18s, transform .18s; }
+
+/* the panel's two actions: rectangular, small, and never wrapping the header */
+.notif-actions { display: inline-flex; align-items: center; gap: 4px; }
+.notif-action {
+  font: inherit; font-size: 10px; line-height: 1; letter-spacing: .02em; text-transform: none;
+  padding: 4px 7px; border-radius: 4px; cursor: pointer;
+  background: var(--panel-2); color: var(--muted); border: 1px solid var(--line);
+  white-space: nowrap;
+}
+.notif-action:hover { color: var(--accent); border-color: var(--accent-line); }
+
+/* the account panel: four fifths of the width, nine tenths of the height */
+.acct-veil {
+  position: fixed; inset: 0; z-index: 70;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--veil); backdrop-filter: blur(8px);
+}
+.acct-veil[hidden] { display: none; }
+.acct-panel {
+  width: 80vw; height: 90vh;
+  display: flex; flex-direction: column;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+  box-shadow: 0 20px 60px var(--shadow); overflow: hidden;
+}
+.acct-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 10px 14px; border-bottom: 1px solid var(--line); background: var(--panel-2);
+}
+.acct-title { font-size: 12px; color: var(--muted); letter-spacing: .06em; text-transform: uppercase; }
+.acct-close { background: none; border: 0; color: var(--muted); font-size: 20px; line-height: 1; cursor: pointer; }
+.acct-body {
+  flex: 1 1 auto; min-height: 0; overflow: hidden; padding: 12px;
+  display: flex; flex-direction: column;
+}
+/* the user card is the window: it fills the body exactly and scrolls inside, never past the footer */
+#acct-body .licence {
+  flex: 1 1 auto; width: 100%; height: auto; min-height: 0; max-height: 100%; margin: 0;
+}
+#acct-body .lic-main { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
+/* the footer reads left to right: what is stored, then the action on the right edge */
+#acct-body .lic-foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: nowrap; }
+#acct-body .lic-foot .lic-status { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#acct-body .lic-foot .btn-send { flex: 0 0 auto; margin-left: auto; }
+.acct-section { background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; }
+.acct-h { margin: 0 0 8px; font-size: 11px; color: var(--muted); letter-spacing: .06em; text-transform: uppercase; }
+.acct-kv, .acct-lane { display: grid; grid-template-columns: 130px minmax(0, 1fr); gap: 8px; padding: 3px 0; font-size: 12px; }
+.acct-lane { grid-template-columns: 14px minmax(0, 1fr) auto; align-items: center; }
+.acct-k { color: var(--dim); }
+.acct-v { color: var(--text); overflow: hidden; text-overflow: ellipsis; }
+
+/* console lines carry their level as a word as well as a colour */
+.term-line { display: flex; gap: 8px; align-items: baseline; }
+.term-at { color: var(--dim); font-variant-numeric: tabular-nums; flex: 0 0 auto; }
+.term-lvl {
+  flex: 0 0 auto; font-size: 9.5px; letter-spacing: .06em; padding: 0 4px;
+  border-radius: 3px; border: 1px solid currentColor; line-height: 1.4;
+}
+.term-warn { color: var(--warn); }
+.term-caution { color: var(--caution); }
+.term-critical { color: var(--bad); }
+.term-info { color: var(--muted); }
+
+/* a reply: the agent's avatar on the left, a title and the message on the right */
+.notif-reply { grid-template-columns: 30px minmax(0, 1fr); align-items: start; gap: 8px; }
+.notif-avatar {
+  width: 30px; height: 30px; border-radius: 50%; overflow: hidden;
+  display: grid; place-items: center; flex: 0 0 auto;
+  background: var(--panel-2); border: 1px solid var(--line);
+  font-size: 10px; color: var(--muted); letter-spacing: .02em;
+}
+.notif-avatar img { width: 100%; height: 100%; object-fit: cover; }
+.notif-copy { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.notif-copy .notif-title { font-size: 11.5px; color: var(--text); }
+.notif-msg {
+  font-size: 11px; color: var(--dim); line-height: 1.35;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+
+/* console history: a date band, and a pager at 128 lines a page */
+.term-date {
+  margin: 8px 0 4px; padding: 2px 0; position: sticky; top: 0;
+  background: var(--panel); color: var(--dim);
+  font-size: 10px; letter-spacing: .08em; text-transform: uppercase;
+  border-bottom: 1px solid var(--line);
+}
+.term-pager {
+  display: flex; align-items: center; gap: 8px; padding: 4px 8px;
+  border-bottom: 1px solid var(--line); color: var(--muted); font-size: 11px;
+}
+.term-pager button {
+  background: var(--panel-2); border: 1px solid var(--line); color: var(--muted);
+  border-radius: 4px; width: 22px; height: 20px; line-height: 1; cursor: pointer;
+}
+.term-pager button:hover { color: var(--accent); border-color: var(--accent-line); }
+
+/* settings: a bullet index at a third of the width, the settings themselves on the right */
+body[data-page="settings"] #page-body {
+  display: grid; grid-template-columns: 20% minmax(0, 1fr);
+  gap: 0; padding: 0;
+  /* .page-col/.home-grid arrive from the home spec and cap the band at 1180px centred; the panel must reach
+     the window edge, so the settings band states its own width and alignment */
+  width: 100%; max-width: 100%; margin: 0; align-items: stretch;
+  /* the band is the window's leftover height, exactly as chat's is; without this the content sets the height
+     and the page grows instead of scrolling inside its own panels */
+  min-height: 0; height: 100%; max-height: 100%; overflow: hidden;
+}
+/* settings has no page header of its own — chat is the same shape, and the site header already names the page */
+body[data-page="settings"] #page-header { display: none; }
+body[data-page="settings"] #page-root { grid-template-rows: minmax(0, 1fr) 5%; height: 100%; min-height: 0; }
+body[data-page="settings"] .set-left,
+body[data-page="settings"] .set-right { height: 100%; min-height: 0; }
+.set-left {
+  border-right: 1px solid var(--line); min-height: 0; overflow-y: auto;
+  /* cards run edge to edge; the tenth-of-width inset lives inside each card, not around the list */
+  padding: 0; box-sizing: border-box;
+  /* reserve the scrollbar's width so the cards do not stop short of the border when the list scrolls */
+  scrollbar-gutter: stable; scrollbar-width: thin; scrollbar-color: var(--line) transparent;
+}
+.set-left-head { display: flex; align-items: center; justify-content: space-between; padding: 8px 10%; position: sticky; top: 0; z-index: 2; background: var(--bg); }
+.set-left-title { font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+.set-sort {
+  font: inherit; font-size: 10.5px; padding: 3px 7px; cursor: pointer;
+  color: var(--muted); background: var(--panel-2); border: 1px solid var(--line); border-radius: 4px;
+}
+.set-sort:hover { color: var(--accent); border-color: var(--accent-line); }
+.set-list {
+  list-style: none; margin: 0; width: 100%; display: flex; flex-direction: column; gap: 6px;
+  /* the tenth-of-width inset, applied once, around the cards */
+  padding: 0 10% 10px; box-sizing: border-box;
+}
+.set-card {
+  width: 100%; text-align: left; cursor: pointer; font: inherit;
+  display: grid; grid-template-columns: 10px minmax(0, 1fr); gap: 2px 6px;
+  padding: 9px 10px; border-radius: 6px;
+  /* one shorthand, so nothing here resets a longhand above it */
+  background: var(--panel); border: 1px solid var(--line); color: var(--text);
+}
+.set-card:hover { border-color: var(--muted); background: var(--panel-2); }
+.set-card:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.set-dot { color: var(--accent); grid-row: span 2; align-self: start; line-height: 1.3; }
+.set-card-title { font-size: 12px; }
+.set-card-note {
+  grid-column: 2; font-size: 10.5px; color: var(--muted); line-height: 1.3;
+  overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+}
+.set-right {
+  min-height: 0; overflow-y: auto; padding: 12px 14px 24px;
+  display: flex; flex-direction: column; gap: 10px;
+  scrollbar-width: thin; scrollbar-color: var(--line) transparent;
+}
+/* the heading keeps the block's own layout; the chevron sits beside it rather than re-flowing the text */
+.set-head { cursor: pointer; user-select: none; position: relative; padding-left: 16px; }
+.set-head h2, .set-head h3 { margin: 0; }
+.set-chevron { position: absolute; left: 0; top: 5px; color: var(--muted); font-size: 10px; transition: transform .15s; }
+.set-collapsed .set-chevron { transform: rotate(-90deg); }
+.set-collapsed .block-content { display: none; }
+.set-collapsed .block-note { display: none; }
+
+/* the selected category, and only it */
+.set-right .block[hidden] { display: none; }
+.set-card.active { border-color: var(--accent-line); background: var(--panel-2); box-shadow: inset 2px 0 0 var(--accent); }
+.set-card.active .set-card-title { color: var(--accent); }
+
+/* the agent list closes to a strip; the control stays put so it can be reopened */
+.rail-head { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
+.rail-toggle {
+  display: grid; place-items: center; flex: 0 0 auto;
+  width: 20px; height: 20px; padding: 0; cursor: pointer;
+  background: var(--panel-2); border: 1px solid var(--line); border-radius: 4px;
+  color: var(--muted);
+}
+.rail-toggle:hover { color: var(--accent); border-color: var(--accent-line); }
+.rail-toggle svg { transition: transform .15s; }
+/* closed, the strip scales with the window but never below the width the chevron needs */
+body[data-page="chat"] #page-body.rail-collapsed {
+  grid-template-columns: clamp(30px, 2.5%, 80px) minmax(0, 1fr);
+}
+body[data-page="chat"] #page-body.rail-collapsed .rail { padding: 6px 4px; }
+body[data-page="chat"] #page-body.rail-collapsed .rail-label,
+body[data-page="chat"] #page-body.rail-collapsed .rail-list { display: none; }
+body[data-page="chat"] #page-body.rail-collapsed .rail-head { justify-content: center; }
+body[data-page="chat"] #page-body.rail-collapsed .rail-toggle svg { transform: rotate(180deg); }
+
+/* the agents page: a bar of agents, and one profile presented as a printed card */
+body[data-page="agents"] #page-root {
+  grid-template-rows: auto minmax(0, 1fr) 5%; height: 100%; min-height: 0;
+}
+body[data-page="agents"] #page-header { display: none; }
+/* two columns: the agents on the left, the controls on the right */
+.page-nav {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center; gap: 10px;
+  padding: 6px 2%; border-bottom: 1px solid var(--line); background: var(--panel-2);
+  min-height: 0;
+}
+.page-nav-left { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.page-nav-right { display: flex; align-items: center; gap: 6px; flex: 0 0 auto; }
+.page-nav-title { font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase; color: var(--dim); margin-right: 4px; }
+.page-tab {
+  font: inherit; font-size: 12px; cursor: pointer; padding: 4px 12px; border-radius: 4px;
+  background: var(--panel); color: var(--muted); border: 1px solid var(--line);
+}
+.page-tab:hover { color: var(--text); border-color: var(--muted); }
+.page-tab.active { color: var(--accent); border-color: var(--accent-line); background: var(--panel-2); }
+.page-tab.pinned { border-style: dashed; }
+.page-tabs {
+  display: flex; gap: 6px; align-items: center;
+  /* the agents scroll sideways rather than wrapping, so the bar stays one line tall */
+  overflow-x: auto; overflow-y: hidden; white-space: nowrap; min-width: 0;
+  padding-bottom: 2px;
+  scrollbar-width: thin; scrollbar-color: var(--line) transparent;
+}
+.page-tabs::-webkit-scrollbar { height: 6px; }
+.page-tabs::-webkit-scrollbar-thumb { background: var(--line); border-radius: 3px; }
+.page-tab { flex: 0 0 auto; }
+.page-search {
+  /* a fifth of the window, so the bar scales with the display rather than at a fixed width */
+  margin-left: auto; font: inherit; font-size: 11.5px; padding: 3px 8px; width: 20vw;
+  color: var(--text); background: var(--panel); border: 1px solid var(--line); border-radius: 4px;
+}
+.page-search:focus { outline: none; border-color: var(--accent-line); }
+.page-sort {
+  margin-left: 0; font: inherit; font-size: 10.5px; padding: 3px 8px; cursor: pointer;
+  color: var(--muted); background: var(--panel); border: 1px solid var(--line); border-radius: 4px;
+}
+.page-sort:hover { color: var(--accent); border-color: var(--accent-line); }
+
+body[data-page="agents"] #page-body {
+  /* the card is 80% wide and at least 90% tall; when its contents need more, the body scrolls rather than
+     squeezing the fields to nothing */
+  display: block;
+  width: 100%; max-width: 100%; padding: 1.5% 0; margin: 0; box-sizing: border-box;
+  min-height: 0; height: 100%; overflow-y: auto;
+  scrollbar-width: thin; scrollbar-color: var(--line) transparent;
+}
+
+/* the profile as a card you could hand to someone */
+.licence {
+  /* four fifths across; nine tenths of the body as a floor, growing when the fields need the room */
+  width: 80%; min-height: 90%; height: auto; margin: 0 auto;
+  display: flex; flex-direction: column;
+  border: 1px solid var(--line); border-radius: 10px; overflow: hidden;
+  background: var(--panel); box-shadow: 0 10px 30px var(--shadow);
+  border-left: 6px solid var(--accent);
+}
+.lic-top {
+  display: flex; align-items: baseline; gap: 10px;
+  padding: 10px 16px; border-bottom: 1px solid var(--line); background: var(--panel-2);
+}
+.lic-brand { font-size: 13px; letter-spacing: .18em; text-transform: uppercase; color: var(--text); }
+.lic-kind { font-size: 10px; letter-spacing: .12em; text-transform: uppercase; color: var(--dim); }
+.lic-id { margin-left: auto; font-size: 11px; color: var(--muted); font-family: var(--mono); }
+.lic-main {
+  flex: 1 1 auto; min-height: 0; overflow-y: auto;
+  display: grid; grid-template-columns: 132px minmax(0, 1fr); gap: 16px; padding: 16px;
+  /* rows keep their own height and the panel scrolls; stretching shrank the portrait to fit a short band */
+  align-content: start; align-items: start;
+  scrollbar-width: thin; scrollbar-color: var(--line) transparent;
+}
+/* the model block keeps its own height; without this it competed with .lic-main and squeezed it to 32px */
+.lic-fields-2 { flex: 0 0 auto; overflow: visible; }
+.lic-photo { display: flex; flex-direction: column; align-items: center; gap: 6px; align-self: start; width: 132px; flex: 0 0 132px; }
+.lic-initials {
+  width: 112px; height: 112px; min-height: 112px; flex: 0 0 auto; border-radius: 18px;
+  display: grid; place-items: center;
+  font-size: 34px; letter-spacing: .04em; color: #10141a;
+  border: 1px solid var(--line); overflow: hidden;
+}
+.lic-caption { font-size: 10px; color: var(--dim); font-family: var(--mono); }
+.lic-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 12px; align-content: start; }
+.lic-fields-2 { padding: 0 16px 12px; }
+.lic-field { display: flex; flex-direction: column; gap: 2px; }
+.lic-field.wide { grid-column: 1 / -1; }
+.lic-label {
+  font-size: 9.5px; letter-spacing: .1em; text-transform: uppercase; color: var(--dim);
+  font-family: var(--mono);
+}
+.lic-input {
+  font: inherit; font-size: 12.5px; padding: 4px 6px; width: 100%;
+  background: transparent; color: var(--text);
+  border: 0; border-bottom: 1px dashed var(--line); border-radius: 0;
+  resize: vertical;
+}
+.lic-input:focus { outline: none; border-bottom-color: var(--accent); background: var(--panel-2); }
+.lic-foot {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 16px; border-top: 1px solid var(--line); background: var(--panel-2);
+}
+.lic-status { font-size: 10.5px; color: var(--dim); font-family: var(--mono); }
+.lic-note { font-size: 10.5px; color: var(--muted); margin-left: auto; }
+
+
+/* create and delete, and the confirmation they require */
+.page-action {
+  font: inherit; font-size: 11.5px; padding: 3px 10px; cursor: pointer; border-radius: 4px;
+  color: var(--text); background: var(--panel); border: 1px solid var(--line);
+}
+.page-action:hover { border-color: var(--muted); }
+.page-action.danger { color: var(--bad); border-color: var(--bad); }
+.page-action.danger:hover { background: var(--panel-2); }
+.confirm-veil {
+  position: fixed; inset: 0; z-index: 80; display: grid; place-items: center;
+  background: var(--veil); backdrop-filter: blur(6px);
+}
+.confirm-box {
+  width: min(420px, 90vw); padding: 18px 20px; border-radius: 10px;
+  background: var(--panel); border: 1px solid var(--line); box-shadow: 0 20px 60px var(--shadow);
+}
+.confirm-title { margin: 0 0 8px; font-size: 14px; }
+.confirm-text { margin: 0 0 14px; font-size: 12px; color: var(--muted); line-height: 1.45; }
+.confirm-input {
+  width: 100%; font: inherit; font-size: 12.5px; padding: 6px 8px; margin-bottom: 14px;
+  background: var(--panel-2); color: var(--text);
+  border: 1px solid var(--line); border-radius: 4px;
+}
+.confirm-input:focus { outline: none; border-color: var(--accent-line); }
+.confirm-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.btn.hold { position: relative; overflow: hidden; touch-action: none; user-select: none; }
+.btn.hold::after {
+  content: ""; position: absolute; inset: 0; width: var(--hold, 0%);
+  background: var(--bg); opacity: .28; pointer-events: none;
+}
+.btn.hold.holding { cursor: grabbing; }
+
+/* provider and model are choices, not free text */
+.lic-select { appearance: none; cursor: pointer; padding-right: 18px;
+  background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%), linear-gradient(135deg, var(--muted) 50%, transparent 50%);
+  background-position: calc(100% - 10px) 60%, calc(100% - 6px) 60%;
+  background-size: 4px 4px, 4px 4px; background-repeat: no-repeat; }
+.lic-test-row { display: flex; align-items: center; gap: 8px; padding-top: 4px; }
+.lic-test {
+  font: inherit; font-size: 10.5px; padding: 2px 8px; cursor: pointer; border-radius: 4px;
+  color: var(--accent); background: transparent; border: 1px solid var(--accent-line);
+}
+.lic-test:hover { background: var(--panel-2); }
+.lic-test:disabled { color: var(--muted); border-color: var(--line); }
+.lic-test-note { font-size: 10.5px; color: var(--muted); }
+
+/* masked in the stylesheet rather than by input type: a password field invites the browser to offer to save it */
+.lic-secret { -webkit-text-security: disc; text-security: disc; letter-spacing: .12em; }
+.lic-secret.revealed { -webkit-text-security: none; text-security: none; letter-spacing: normal; font-family: var(--mono); }
+
+/* centred reveal warning, with its own close control */
+.confirm-box { position: relative; }
+.confirm-box.centered .confirm-title { text-align: center; padding: 0 24px; }
+.confirm-box.centered .confirm-text { white-space: pre-line; }
+.confirm-box.centered .confirm-actions { justify-content: center; }
+.confirm-x {
+  position: absolute; top: 6px; right: 8px; width: 24px; height: 24px;
+  display: grid; place-items: center; cursor: pointer;
+  background: none; border: 0; color: var(--muted); font-size: 18px; line-height: 1;
+}
+.confirm-x:hover { color: var(--text); }
+
+/* birth date, and the accent picker */
+.lic-date { display: flex; gap: 6px; }
+.lic-date select { flex: 1 1 auto; min-width: 0; }
+.lic-accent { display: flex; align-items: center; gap: 8px; }
+.lic-colour {
+  flex: 0 0 auto; width: 48px; height: 30px; padding: 0; cursor: pointer;
+  background: transparent; border: 1px solid var(--line); border-radius: 4px;
+}
+.lic-alpha { flex: 0 0 120px; accent-color: var(--accent); }
+.lic-accent .lic-input { flex: 1 1 auto; font-family: var(--mono); font-size: 11.5px; }
+.lic-field.wide .lic-input[style] { border-bottom: 0; border-radius: 4px; padding: 4px 8px; }
+
+/* the provider block folds: heading always visible, fields behind it */
+.lic-section-head {
+  grid-column: 1 / -1; display: flex; align-items: center; gap: 6px;
+  padding: 6px 0 4px; border-bottom: 1px solid var(--line); cursor: pointer; user-select: none;
+}
+.lic-section-title { font-size: 10px; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); }
+.lic-chevron { color: var(--muted); font-size: 10px; transition: transform .15s; }
+.lic-fields-2.collapsed .lic-chevron { transform: rotate(-90deg); }
+.lic-fields-2.collapsed > *:not(.lic-section-head) { display: none; }
+.lic-fields-2.collapsed { flex: 0 0 auto; }
+
+/* accent under the portrait: a label, a rectangle of the colour, the opacity slider, the value */
+.lic-accent-under { display: flex; flex-direction: column; align-items: center; gap: 5px; width: 112px; flex: 0 0 auto; margin-top: 4px; }
+.lic-accent-label { font-size: 9px; letter-spacing: .1em; text-transform: uppercase; color: var(--dim); font-family: var(--mono); }
+.lic-accent-btn {
+  position: relative; display: block; width: 112px; height: 26px; cursor: pointer;
+  border-radius: 5px; border: 1px solid var(--line); overflow: hidden;
+}
+.lic-accent-btn .lic-colour { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; cursor: pointer; border: 0; padding: 0; }
+.lic-accent-under .lic-alpha { width: 100%; }
+.lic-accent-read { width: 100%; font-size: 9.5px; text-align: center; color: var(--text); border-bottom: 0; padding: 1px 2px; border-radius: 3px; }
+
+/* the square palette the accent button opens */
+.colour-pop {
+  position: fixed; z-index: 90; padding: 8px; width: 180px; height: 180px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+  box-shadow: 0 16px 40px var(--shadow);
+}
+.colour-grid { display: grid; grid-template-columns: repeat(4, 1fr); grid-template-rows: repeat(4, 1fr); gap: 6px; height: 100%; }
+.colour-swatch { border: 1px solid var(--line); border-radius: 5px; cursor: pointer; padding: 0; }
+.colour-swatch:hover { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* the popup: spectrum above, three channel sliders with integers below */
+.colour-pop { display: flex; flex-direction: column; gap: 8px; padding: 10px; width: 190px; height: auto; }
+.colour-field { width: 100%; height: auto; border-radius: 6px; border: 1px solid var(--line); cursor: crosshair; display: block; }
+.colour-sliders { display: flex; flex-direction: column; gap: 5px; }
+.colour-slider-row { display: grid; grid-template-columns: 12px minmax(0, 1fr) 42px; align-items: center; gap: 6px; }
+.colour-slider-name { font-size: 10px; color: var(--dim); font-family: var(--mono); }
+.colour-range { width: 100%; accent-color: var(--accent); }
+.colour-num {
+  font: inherit; font-size: 11px; width: 100%; padding: 2px 4px; text-align: right;
+  background: var(--panel-2); color: var(--text); border: 1px solid var(--line); border-radius: 4px;
+}
+.colour-apply {
+  font: inherit; font-size: 11.5px; padding: 5px 0; cursor: pointer; border-radius: 4px;
+  color: var(--bg); background: var(--accent); border: 1px solid var(--accent); font-weight: 600;
+}
+
+/* the value of what the graph shows */
+.colour-hex {
+  font: inherit; font-size: 11.5px; font-family: var(--mono); text-align: center;
+  padding: 3px 6px; width: 100%; box-sizing: border-box;
+  background: var(--panel-2); color: var(--text);
+  border: 1px solid var(--line); border-radius: 4px;
+}
+.colour-hex:focus { outline: none; border-color: var(--accent-line); }
+.colour-field { touch-action: none; }
+
+/* eyedropper, then the value */
+.colour-hexrow { display: grid; grid-template-columns: 26px minmax(0, 1fr); gap: 6px; align-items: stretch; }
+.colour-dropper {
+  display: grid; place-items: center; cursor: pointer; padding: 0;
+  background: var(--panel-2); color: var(--muted);
+  border: 1px solid var(--line); border-radius: 4px;
+}
+.colour-dropper:hover { color: var(--accent); border-color: var(--accent-line); }
+
+/* the portrait's menu: choose an image, or reset to initials */
+.avatar-pop {
+  position: fixed; z-index: 95; display: flex; flex-direction: column; gap: 4px;
+  padding: 6px; width: 150px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+  box-shadow: 0 16px 40px var(--shadow);
+}
+.avatar-item {
+  font: inherit; font-size: 11.5px; text-align: left; padding: 6px 8px; cursor: pointer;
+  color: var(--text); background: transparent; border: 0; border-radius: 4px;
+}
+.avatar-item:hover { background: var(--panel-2); color: var(--accent); }
+.lic-initials { background-size: cover; background-position: center; }
+
+/* the 3x3 cropper */
+.crop-veil { position: fixed; inset: 0; z-index: 96; display: grid; place-items: center;
+  background: var(--veil); backdrop-filter: blur(6px); }
+.crop-box { width: min(520px, 92vw); background: var(--panel); border: 1px solid var(--line);
+  border-radius: 10px; overflow: hidden; box-shadow: 0 20px 60px var(--shadow); }
+.crop-head { display: flex; align-items: center; justify-content: space-between; position: relative;
+  padding: 9px 12px; border-bottom: 1px solid var(--line); background: var(--panel-2); }
+.crop-title { font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+/* the square that becomes the avatar, with the grid as guides */
+.crop-stage {
+  position: relative; width: 100%; aspect-ratio: 1 / 1; overflow: hidden;
+  background: var(--bg); cursor: grab; touch-action: none; line-height: 0;
+}
+.crop-stage:active { cursor: grabbing; }
+.crop-image { position: absolute; top: 0; left: 0; display: block; user-select: none; pointer-events: none; }
+.crop-grid-guide {
+  position: absolute; inset: 0; pointer-events: none;
+  background-image: linear-gradient(to right, rgba(255,255,255,.28) 1px, transparent 1px),
+                    linear-gradient(to bottom, rgba(255,255,255,.28) 1px, transparent 1px);
+  background-size: 33.3333% 33.3333%;
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,.35);
+}
+/* one slider each way */
+.crop-controls { display: flex; gap: 12px; padding: 10px 14px 4px; align-items: stretch; }
+.crop-slider-row { display: flex; align-items: center; gap: 6px; flex: 1 1 auto; min-width: 0; }
+.crop-slider-name { font-size: 9px; letter-spacing: .04em; text-transform: uppercase; color: var(--dim); }
+.crop-slider { flex: 1 1 auto; accent-color: var(--accent); min-width: 0; }
+.crop-slider-vertical { flex: 0 0 46px; }
+.crop-slider-vertical .crop-slider { writing-mode: vertical-lr; direction: rtl; height: 74px; }
+.crop-actions { display: flex; justify-content: center; padding: 8px 14px 14px; }
+
+/* the vertical slider sits to the left of the image */
+.crop-body { display: grid; grid-template-columns: 46px minmax(0, 1fr); gap: 8px; padding: 0 14px; align-items: stretch; }
+.crop-body .crop-stage { aspect-ratio: 1 / 1; }
+.crop-slider-vertical { flex-direction: column; justify-content: center; }
+
+/* what the cropper's controls do, in italics, one line each */
+.crop-hint {
+  margin: 0; padding: 4px 16px 12px; list-style: disc inside;
+  font-style: italic; font-size: 10.5px; color: var(--dim); line-height: 1.5;
+  /* two lines down the left, two down the right */
+  display: grid; grid-auto-flow: column; grid-template-rows: auto auto;
+  column-gap: 18px; row-gap: 1px;
+}
+.crop-hint-item { margin: 0; }
+
+/* the library header above the portrait */
+.lib-row { display: flex; align-items: center; justify-content: space-between; width: 112px; gap: 4px; margin-bottom: 4px; }
+.lib-btn {
+  width: 18px; height: 18px; display: grid; place-items: center; padding: 0; cursor: pointer;
+  font: inherit; font-size: 12px; line-height: 1; color: var(--muted);
+  background: var(--panel-2); border: 1px solid var(--line); border-radius: 4px;
+}
+.lib-btn:hover { color: var(--accent); border-color: var(--accent-line); }
+.lib-label { font-size: 9px; letter-spacing: .08em; text-transform: uppercase; color: var(--dim); white-space: nowrap; }
+
+/* a rail dot that carries an avatar keeps a ring so the state colour is still readable */
+.rail-dot.has-avatar {
+  box-shadow: 0 0 0 2px var(--panel), 0 0 0 3px currentColor;
+  border-radius: 50%; overflow: hidden;
+}
+
+/* a message avatar that carries a picture keeps its circle and drops the letter */
+.msg-avatar.has-avatar { overflow: hidden; padding: 0; }
+.msg-avatar-img { width: 100%; height: 100%; object-fit: cover; display: block; border-radius: inherit; }
+
+/* profile name, then the nickname in a quieter voice, then the status */
+/* one line per agent, centred vertically: avatar · profile · agent · status */
+.rail-item {
+  display: flex; align-items: center; justify-content: flex-start; gap: 6px;
+  height: 32px; padding: 0 6px; overflow: hidden;
+}
+.rail-dot.has-avatar {
+  width: 22px; height: 22px; border-radius: 50%;
+  background-size: cover; background-position: center; background-repeat: no-repeat;
+  box-shadow: none; font-size: 0;
+}
+/* all four on one line; they share the row and truncate rather than wrapping */
+.rail-dot { flex: 0 0 22px; }
+.rail-name {
+  flex: 0 1 auto; min-width: 0; font-size: 11px; line-height: 1;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.rail-nick {
+  flex: 0 1 auto; min-width: 0; font-size: 9.5px; line-height: 1; color: var(--dim); font-style: italic;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.rail-status {
+  /* the whole word, never clipped: the names shorten before this does */
+  flex: 0 0 auto; font-size: 9px; line-height: 1; text-transform: uppercase; letter-spacing: .02em;
+  white-space: nowrap;
+}
+
+/* the editable "You" block in the account window */
+.acct-field { display: grid; grid-template-columns: 90px minmax(0, 1fr); gap: 8px; align-items: center; margin-bottom: 5px; }
+.acct-input {
+  font: inherit; font-size: 12px; padding: 4px 7px; width: 100%;
+  background: var(--panel); color: var(--text);
+  border: 1px solid var(--line); border-radius: 4px;
+}
+.acct-input:focus { outline: none; border-color: var(--accent-line); }
+.acct-save-row { display: flex; align-items: center; gap: 10px; padding-top: 6px; }

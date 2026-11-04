@@ -16,6 +16,7 @@
   --accent-2: #a5b4fc;
   --ok: #4ade80;
   --warn: #fbbf24;
+  --caution: #e0862a;   /* orange: unfinished, with an issue */
   --bad: #f87171;
   --header-top: #131720;
   --error-bg: #2a1212;
@@ -79,6 +80,7 @@
   --accent-2: #4b57c4;
   --ok: #1c7a46;
   --warn: #8a6100;
+  --caution: #c9721b;
   --bad: #b3261e;
   --header-top: #eef1f5;
   --error-bg: #fdecea;

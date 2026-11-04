@@ -156,10 +156,13 @@ def accent_for(name: str, config: dict | None = None) -> str:
 
 DEFAULTS = {
     "accent": "",
-    "persona": {"name": "", "role": "", "tone": "", "boundaries": ""},
+    "persona": {"name": "", "first_name": "", "last_name": "", "nickname": "", "role": "",
+                "tone": "", "boundaries": "", "likes": "", "dislikes": "", "bio": "",
+                "birth_date": "", "accent": ""},
     "model": {"provider": "openai", "base_url": "", "name": "", "window": 32768,
               "max_output_tokens": 1024, "temperature": 0.7, "local": "",
-              "context_window_local": None, "context_window_provider": None},
+              "context_window_local": None, "context_window_provider": None,
+               "context_window_provider_model": None},
     "api_key": "",
 }
 
@@ -173,7 +176,7 @@ BLANK_BY_DESIGN = {
     "plugins": ("enabled",),
     # a lane has no floor of its own until one is set, and a provider-published window is absent until one is
     # fetched: blank is the honest value in both cases
-    "model": ("context_window_local", "context_window_provider"),
+    "model": ("context_window_local", "context_window_provider", "context_window_provider_model"),
 }
 
 PERSONA_TEMPLATE = """\
@@ -437,7 +440,8 @@ def write(profile_root: Path, config: dict, base: dict | None = None) -> Path:
                     ("name", "role", "tone", "boundaries", "accent")},
         "model": {key: model.get(key) for key in
                   ("provider", "base_url", "name", "window", "max_output_tokens",
-                   "temperature", "key_name", "context_window_local", "context_window_provider")},
+                   "temperature", "key_name", "context_window_local", "context_window_provider",
+                   "context_window_provider_model")},
     }
     # the effective global config supplies the values an agent has not overridden, so every key can be written
     if base is None:
@@ -463,6 +467,9 @@ def write(profile_root: Path, config: dict, base: dict | None = None) -> Path:
                                 if is_local else {})
 
 
+    # the template declares `api_key:` and the fill never supplied it, so the name of the secret was written
+    # nowhere: the key existed in a .secret and the profile could not point at it
+    values["api_key"] = str(model.get("key_name") or existing.get("api_key") or "")
     body = _preserve_sections(_fill(template_for_agent(), values), existing_text or "")
     target = path(profile_root)
     _write_atomic(target, body)
@@ -545,7 +552,8 @@ def as_cfg(agent_cfg: dict, base_cfg: dict) -> dict:
             model["base_url"] = DEFAULT_BASE_URLS.get(provider, "")
         model["name"] = str(agent_model.get("name") or model.get("name") or "")
 
-    for key in ("window", "max_output_tokens", "temperature", "key_name", "context_window_local", "context_window_provider"):
+    for key in ("window", "max_output_tokens", "temperature", "key_name", "context_window_local",
+                "context_window_provider", "context_window_provider_model"):
         if agent_model.get(key) is not None:
             model[key] = agent_model[key]
 

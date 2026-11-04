@@ -93,9 +93,13 @@ class InboundGuard:
                 return value
         return ""
 
+    # assets a page needs to exist at all: a 429 on one of these does not slow an attacker down, it leaves a
+    # half-built page for the person using it
+    STATIC_PREFIXES = ("/css/", "/js/", "/favicon")
+
     def evaluate(self, client: str, path: str, headers: dict) -> tuple[int, str] | None:
         """Return (status, reason) to refuse, or None to let it through."""
-        if self.limiter.hit(client):
+        if not path.startswith(self.STATIC_PREFIXES) and self.limiter.hit(client):
             return 429, f"rate limit exceeded ({self.limiter.count(client)} in 60s)"
         if not _is_loopback(client):
             if self.loopback_only and self._sensitive(path):

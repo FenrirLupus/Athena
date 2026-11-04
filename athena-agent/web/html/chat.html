@@ -39,6 +39,7 @@
     <div class="nav-links">
           <a class="nav-link" href="../index.html" data-page="home">Home</a>
           <a class="nav-link active" href="chat.html" data-page="chat">Chat</a>
+          <a class="nav-link" href="agents.html" data-page="agents">Agents</a>
           <a class="nav-link" href="settings.html" data-page="settings">Settings</a>
         </div>
     <div class="nav-tools">
@@ -48,6 +49,17 @@
           <path d="M6.6 11.4a1.5 1.5 0 0 0 2.8 0z" fill="currentColor"/>
         </svg>
       </button>
+      <div class="notif-panel" id="notif-panel" hidden role="dialog" aria-label="notifications">
+        <div class="notif-head">
+          <span>Notifications</span>
+          <span class="notif-actions">
+            <button class="notif-action" id="notif-read-all" type="button">Mark as Read</button>
+            <button class="notif-action" id="notif-clear-all" type="button">Clear All</button>
+            <button class="notif-clear" id="notif-close" type="button" aria-label="close">×</button>
+          </span>
+        </div>
+        <ul class="notif-list" id="notif-list"><li class="notif-empty muted small">nothing yet</li></ul>
+      </div>
       <button class="nav-avatar" id="avatar" type="button" aria-label="Account">DJ</button>
     </div>
   </nav>
@@ -65,8 +77,14 @@
 
         <aside class="rail" aria-label="Agents">
           <div class="rail-head">
-            <span>Agents</span>
-            <span class="muted small" id="channel-count">0</span>
+            <span class="rail-label">Agents</span>
+            <button class="rail-toggle" id="rail-toggle" type="button"
+                    aria-label="hide agent list" aria-expanded="true" aria-controls="channel-list">
+              <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor"
+                   stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M15 18l-6-6 6-6"/>
+              </svg>
+            </button>
           </div>
           <ul class="rail-list" id="channel-list">
             <li class="rail-empty muted small">no agents yet</li>
@@ -74,12 +92,6 @@
         </aside>
 
         <div class="panels">
-          <nav class="panel-tabs" role="tablist" aria-label="conversation views">
-            <button class="pill tab active" type="button" role="tab" data-tab="thread"
-                    aria-selected="true" aria-controls="panel-thread">Thread</button>
-            <button class="pill tab" type="button" role="tab" data-tab="resources"
-                    aria-selected="false" aria-controls="panel-resources">Resources</button>
-          </nav>
           <div class="panel active" id="panel-thread" role="tabpanel">
             <div class="thread-legend">
               <span>→ outbound · this agent</span>
@@ -107,12 +119,6 @@
             </div>
             <div class="thread-note muted small" id="thread-note"></div>
           </div>
-
-          <div class="panel" id="panel-resources" role="tabpanel">
-            <div class="resources" id="resources-cards">
-              <p class="muted">no channel selected</p>
-            </div>
-          </div>
         </div>
       </section>
 
@@ -121,7 +127,12 @@
         <form class="composer" id="composer">
           <!-- attach: file picker on the left, chips above the field, uploaded to the channel's workspace -->
           <button class="btn btn-attach" id="chat-attach" type="button" title="Attach a file"
-                  aria-label="attach a file">📎</button>
+                  aria-label="attach a file">
+            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor"
+                 stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M21.4 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.2-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/>
+            </svg>
+          </button>
           <input type="file" id="chat-file" multiple hidden>
           <textarea class="composer-input" id="chat-text" rows="1"
                     placeholder="Message the channel…  (Enter to send, Shift+Enter for a new line)"
@@ -211,5 +222,22 @@
   <script src="../js/approvals.js"></script>
   <script src="../js/terminal.js"></script>
   <script src="../js/page-specs.js"></script>
+  <script src="../js/notif.js"></script>
+  <div class="acct-veil" id="acct-veil" hidden role="dialog" aria-modal="true" aria-label="account profile">
+    <div class="acct-panel">
+      <div class="acct-head">
+        <span class="acct-title">Account</span>
+        <button class="acct-close" id="acct-close" type="button" aria-label="close">×</button>
+      </div>
+      <div class="acct-body" id="acct-body"><p class="muted small">loading…</p></div>
+    </div>
+  </div>
+  <script src="../js/account.js"></script>
+  <script src="../js/console-tap.js"></script>
+  <script src="../js/rail-toggle.js"></script>
+  <script src="../js/rail-avatars.js"></script>
+  <script src="../js/thread-avatars.js"></script>
+  <script src="../js/rail-order.js"></script>
+  <script src="../js/accent.js"></script>
 </body>
 </html>

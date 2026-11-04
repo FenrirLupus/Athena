@@ -17,6 +17,8 @@ model:
   context_window_local: 32768
   # The figure the provider's /models reported for the model in use; 0 means none was published.
   context_window_provider: 0
+  # which model the published window belongs to; a figure from another model is ignored
+  context_window_provider_model: ""
 
   # Hard ceiling on one reply, in tokens; the effective cap is the smaller of this and output_pct.
   max_output_tokens: 4096

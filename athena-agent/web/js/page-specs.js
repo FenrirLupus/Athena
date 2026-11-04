@@ -126,7 +126,8 @@
     var hasWizard = !!document.getElementById("wizard-steps");
     var hasBody = !!document.querySelector("#page-body .block");
     if (hasWizard) wizardSpec();
-    if (hasBody && page === "settings") settingsSpec();
+    // settings is owned by settings-panels.js; building a second index here duplicated it
+  // if (hasBody && page === "settings") settingsSpec();
     else if (hasBody && page !== "new-agent") homeSpec();
   }
 

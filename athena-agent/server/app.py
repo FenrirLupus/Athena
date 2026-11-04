@@ -15,6 +15,7 @@ from urllib.parse import unquote
 import json
 
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.responses import JSONResponse, Response
 
@@ -46,9 +47,17 @@ from tools import registry as tools_registry
 class PersonaModel(BaseModel):
     # The human-facing description of the agent; written to ASSISTANT.md.
     name: str = Field("", max_length=80)
+    first_name: str = Field("", max_length=80)
+    last_name: str = Field("", max_length=80)
+    nickname: str = Field("", max_length=80)
     role: str = Field("", max_length=600)
     tone: str = Field("", max_length=600)
     boundaries: str = Field("", max_length=600)
+    likes: str = Field("", max_length=600)
+    dislikes: str = Field("", max_length=600)
+    bio: str = Field("", max_length=2000)
+    birth_date: str = Field("", max_length=10)
+    accent: str = Field("", max_length=40)
 
 
 class AgentModel(BaseModel):
@@ -104,8 +113,11 @@ class AgentSetup(BaseModel):
     persona: PersonaModel = Field(default_factory=PersonaModel)
     model: AgentModel = Field(default_factory=AgentModel)
 
-    # Collected once and written to .secret; never stored in the profile and never returned.
+    # Collected once and written to a .secret; never stored in the profile and never returned.
     api_key: str = Field("", max_length=400)
+
+    # global keeps the credential in the installation's .secret; local gives this agent its own file beside its profile
+    key_scope: str = Field("global", pattern="^(global|local)$")
 
 
 class NewAgent(BaseModel):
@@ -230,6 +242,155 @@ def create_app() -> FastAPI:
 
     from core import context_window as window_mod
 
+    @app.get("/diagnostics")
+    async def diagnostics(limit: int = 200):
+        """Turn outcomes folded into the three levels: what finished slowly, what is stuck, what failed."""
+        from core import metrics as metrics_mod
+        from core import outcomes as outcomes_mod
+        # the install root is two levels above this file: <root>/athena-agent/server/app.py
+        from pathlib import Path as _Path
+        base = _Path(__file__).resolve().parents[2]
+        rows = metrics_mod.read(base, limit=limit) or []
+        try:
+            slow = float((cfg.get("metrics") or {}).get("slow_turn_s") or 60.0)
+        except Exception:
+            slow = 60.0
+        return outcomes_mod.diagnostics(rows, slow_s=slow)
+
+
+    @app.get("/console/history")
+    async def console_history(page: int = 1, size: int = 128):
+        """Whole console history, dated, 128 lines to a page."""
+        from server import console as console_mod
+        return console_mod.history(page=page, size=size)
+
+    @app.get("/console")
+    async def console_tail(since: int = 0, limit: int = 200):
+        """The process's own log, from a cursor: the terminal overlay reads this instead of guessing."""
+        from server import console as console_mod
+        console_mod.install()
+        rows = console_mod.recent(since, limit)
+        return {"rows": rows, "cursor": rows[-1]["seq"] if rows else since}
+
+    def _user_file(channel: str = ""):
+        """The person's own details, kept with the agent they are talking to.
+
+        Each profile gets its own copy, so what one agent knows about you is not automatically what another knows;
+        with no channel given the installation-wide file is used.
+        """
+        if channel:
+            try:
+                return manager_root(channel) / "user.json"
+            except (KeyError, ValueError):
+                raise HTTPException(status_code=404, detail=f"no such agent: {channel}") from None
+        return agents_dir.parent / "user.json"
+
+    def _user_avatars() -> Path:
+        folder = agents_dir.parent / "user" / "avatars"
+        folder.mkdir(parents=True, exist_ok=True)
+        return folder
+
+    @app.get("/user/avatars")
+    def list_user_avatars() -> dict:
+        folder = _user_avatars()
+        numbers = []
+        for existing in folder.glob("avatar-0*.png"):
+            try:
+                numbers.append(int(existing.stem.split("-", 1)[1]))
+            except (ValueError, IndexError):
+                continue
+        numbers.sort()
+        selected = numbers[-1] if numbers else None
+        marker = folder / "selected"
+        try:
+            selected = int(marker.read_text(encoding="utf-8").strip())
+        except (OSError, ValueError):
+            pass
+        return {"numbers": numbers, "selected": selected}
+
+    @app.get("/user/avatar")
+    def get_user_avatar(n: int | None = None):
+        folder = _user_avatars()
+        candidates = []
+        for existing in folder.glob("avatar-0*.png"):
+            try:
+                candidates.append((int(existing.stem.split("-", 1)[1]), existing))
+            except (ValueError, IndexError):
+                continue
+        if not candidates:
+            raise HTTPException(status_code=404, detail="no avatar")
+        if n is None:
+            try:
+                n = int((folder / "selected").read_text(encoding="utf-8").strip())
+            except (OSError, ValueError):
+                pass
+        if n is not None:
+            for number, path in candidates:
+                if number == n:
+                    return FileResponse(str(path), media_type="image/png")
+        return FileResponse(str(max(candidates)[1]), media_type="image/png")
+
+    @app.post("/user/avatar")
+    def put_user_avatar(payload: dict) -> dict:
+        import base64
+        import binascii
+        data = str(payload.get("data") or "")
+        if not data.startswith("data:image/png;base64,"):
+            raise HTTPException(status_code=400, detail="expected a PNG data URL")
+        blob = data.split(",", 1)[1]
+        if len(blob) > 12 * 1024 * 1024:
+            raise HTTPException(status_code=413, detail="avatar is too large")
+        try:
+            raw = base64.b64decode(blob, validate=True)
+        except (binascii.Error, ValueError):
+            raise HTTPException(status_code=400, detail="avatar is not valid base64") from None
+        if not raw.startswith(b"\x89PNG\r\n\x1a\n"):
+            raise HTTPException(status_code=400, detail="not a PNG")
+        folder = _user_avatars()
+        numbers = []
+        for existing in folder.glob("avatar-0*.png"):
+            try:
+                numbers.append(int(existing.stem.split("-", 1)[1]))
+            except (ValueError, IndexError):
+                continue
+        number = (max(numbers) + 1) if numbers else 1
+        target = folder / f"avatar-0{number}.png"
+        tmp = folder / (target.name + ".tmp")
+        tmp.write_bytes(raw)
+        tmp.replace(target)
+        (folder / "selected").write_text(str(number), encoding="utf-8")
+        return {"saved": True, "file": target.name, "count": number}
+
+    @app.get("/user/profile")
+    def get_user_profile(channel: str = "") -> dict:
+        """What the operator has told this agent about themselves. Absent fields stay absent."""
+        import json as _json
+        target = _user_file(channel)
+        if not target.exists():
+            return {"user": {}, "channel": channel, "inherited": False}
+        try:
+            data = _json.loads(target.read_text(encoding="utf-8")) or {}
+            return {"user": data, "channel": channel, "inherited": False}
+        except (OSError, ValueError):
+            return {"user": {}, "channel": channel, "inherited": False}
+
+    @app.post("/user/profile")
+    def put_user_profile(payload: dict, channel: str = "") -> dict:
+        """Store the operator's own details. Written whole and atomically: a half-written profile is worse than none."""
+        import json as _json
+        allowed = ("name", "handle", "email", "timezone", "location", "pronouns", "notes", "accent")
+        clean = {}
+        for key in allowed:
+            value = payload.get(key)
+            if value is None:
+                continue
+            clean[key] = str(value)[:400]
+        target = _user_file(channel)
+        tmp = target.with_suffix(".json.tmp")
+        tmp.write_text(_json.dumps(clean, indent=2) + "\n", encoding="utf-8")
+        tmp.replace(target)
+        return {"saved": True, "keys": sorted(clean)}
+
     @app.get("/health")
     def health() -> dict:
         try:
@@ -300,19 +461,153 @@ def create_app() -> FastAPI:
         return {"channel": channel, "instructions": live, "roster": managers.roster(channel),
                 "chars": len(live)}
 
+    @app.get("/agents/{channel}/secret-key")
+    def reveal_secret(channel: str) -> dict:
+        """Return this agent's own stored key, for the operator reading their own profile.
+
+        Only the agent's own .secret entry is read: global credentials are chosen on the settings page, and an
+        agent's key is not reachable through another lane. The route answers on loopback behind the same gate as
+        every other one, and returns nothing when no key is configured.
+        """
+        root = manager_root(channel)
+        cfg = agentconfig.read(root)
+        cfg_model = cfg.get("model") or {}
+        provider = str(cfg_model.get("provider") or "openai")
+        name = str(cfg.get("api_key") or cfg_model.get("key_name") or ""
+                   or providers_base.secret_name(provider, str(cfg_model.get("base_url") or "")))
+        key = ""
+        local_secret = (root / ".secret").exists()
+        if name:
+            try:
+                key = (providers_base.api_key(provider, name, root=root if local_secret else None)
+                       or providers_base.api_key(provider, name) or "")
+            except Exception:
+                key = ""
+        if not key:
+            raise HTTPException(status_code=404, detail="no key is stored for this agent")
+        try:
+            ledger.record("red", "key-reveal", f"secret {name} revealed for {channel}",
+                          f"profiles/{channel}/.secret", channel)
+        except Exception:
+            pass
+        return {"name": name, "key": key, "length": len(key)}
+
+    @app.get("/agents/{channel}/avatars")
+    def list_avatars(channel: str) -> dict:
+        """The numbered avatars this agent has saved, newest last."""
+        folder = manager_root(channel) / "avatars"
+        numbers = []
+        for existing in folder.glob("avatar-0*.png"):
+            try:
+                numbers.append(int(existing.stem.split("-", 1)[1]))
+            except (ValueError, IndexError):
+                continue
+        numbers.sort()
+        selected = None
+        marker = folder / "selected"
+        try:
+            selected = int(marker.read_text(encoding="utf-8").strip())
+        except (OSError, ValueError):
+            selected = numbers[-1] if numbers else None
+        return {"channel": channel, "numbers": numbers, "selected": selected,
+                "files": [f"avatar-0{n}.png" for n in numbers]}
+
+    @app.post("/agents/{channel}/avatar/select")
+    def select_avatar(channel: str, payload: dict) -> dict:
+        """Remember which of this agent's avatars is in use."""
+        folder = manager_root(channel) / "avatars"
+        number = int(payload.get("n") or 0)
+        if not (folder / f"avatar-0{number}.png").exists():
+            raise HTTPException(status_code=404, detail=f"no avatar-0{number}.png")
+        (folder / "selected").write_text(str(number), encoding="utf-8")
+        return {"channel": channel, "selected": number}
+
+    @app.get("/agents/{channel}/avatar")
+    def get_avatar(channel: str, n: int | None = None):
+        """This agent's avatar, or 404 when it has none."""
+        folder = manager_root(channel) / "avatars"
+        candidates = []
+        for existing in folder.glob("avatar-0*.png"):
+            try:
+                candidates.append((int(existing.stem.split("-", 1)[1]), existing))
+            except (ValueError, IndexError):
+                continue
+        if not candidates:
+            raise HTTPException(status_code=404, detail="no avatar")
+        if n is None:
+            marker = folder / "selected"
+            try:
+                chosen = int(marker.read_text(encoding="utf-8").strip())
+                if chosen:
+                    n = chosen
+            except (OSError, ValueError):
+                pass
+        if n is not None:
+            for number, path in candidates:
+                if number == n:
+                    return FileResponse(str(path), media_type="image/png")
+            raise HTTPException(status_code=404, detail=f"no avatar-0{n}.png")
+        target = max(candidates)[1]
+        return FileResponse(str(target), media_type="image/png")
+
+    @app.post("/agents/{channel}/avatar")
+    def put_avatar(channel: str, payload: dict) -> dict:
+        """Store a 1024x1024 avatar inside the agent's own directory.
+
+        The crop happens in the browser, where the pixels already are; the server refuses anything that is not a
+        PNG of the expected size, so a malformed or oversized upload cannot become an unbounded file on disk.
+        """
+        import base64
+        import binascii
+        data = str(payload.get("data") or "")
+        if not data.startswith("data:image/png;base64,"):
+            raise HTTPException(status_code=400, detail="expected a PNG data URL")
+        blob = data.split(",", 1)[1]
+        if len(blob) > 12 * 1024 * 1024:
+            raise HTTPException(status_code=413, detail="avatar is too large")
+        try:
+            raw = base64.b64decode(blob, validate=True)
+        except (binascii.Error, ValueError):
+            raise HTTPException(status_code=400, detail="avatar is not valid base64") from None
+        if not raw.startswith(b"\x89PNG\r\n\x1a\n"):
+            raise HTTPException(status_code=400, detail="not a PNG")
+        root_dir = manager_root(channel)
+        folder = root_dir / "avatars"
+        folder.mkdir(parents=True, exist_ok=True)
+        numbers = []
+        for existing in folder.glob("avatar-0*.png"):
+            try:
+                numbers.append(int(existing.stem.split("-", 1)[1]))
+            except (ValueError, IndexError):
+                continue
+        number = (max(numbers) + 1) if numbers else 1
+        target = folder / f"avatar-0{number}.png"
+        tmp = folder / (target.name + ".tmp")
+        tmp.write_bytes(raw)
+        tmp.replace(target)
+        return {"channel": channel, "path": str(target), "file": target.name,
+                "bytes": len(raw), "count": number}
+
     @app.get("/agents/{channel}/profile")
     def get_profile(channel: str) -> dict:
         """This agent's own config, with the key reduced to the NAME of its .secret line."""
         root = manager_root(channel)
         cfg = agentconfig.read(root)
         model = dict(cfg.get("model") or {})
+        provider_name = str(model.get("provider") or "openai")
+        key_name = str(cfg.get("api_key") or model.get("key_name") or ""
+                       or providers_base.secret_name(provider_name, str(model.get("base_url") or "")))
+        local_secret = (root / ".secret").exists()
+        scope = "local" if local_secret else "global"
+        has_key = bool(key_name and (providers_base.api_key(provider_name, key_name, root=root if local_secret else None)
+                                     or providers_base.api_key(provider_name, key_name)))
         return {"channel": channel, "configured": bool(model.get("name") or model.get("base_url")
                                                        or agentconfig.local_model_name(model)),
                 "persona": cfg.get("persona") or {},
                 "model": model,
-                "api_key_name": cfg.get("api_key") or "",
-                "has_key": bool(cfg.get("api_key") and providers_base.api_key(
-                    str(model.get("provider") or "openai"), str(cfg.get("api_key") or ""))),
+                "api_key_name": key_name,
+                "key_scope": scope,
+                "has_key": has_key,
                 "inherits_global": not bool(model.get("name") or model.get("base_url")
                                             or agentconfig.local_model_name(model))}
 
@@ -369,7 +664,8 @@ def create_app() -> FastAPI:
             has_any = bool(providers_base.api_key(provider, key_name)
                            or providers_base.api_key(provider, derived))
             if setup.api_key.strip():
-                providers_base.write_secret(key_name, setup.api_key)
+                providers_base.write_secret(key_name, setup.api_key,
+                                            root=root if setup.key_scope == "local" else None)
             elif not has_any:
                 raise HTTPException(status_code=400,
                                     detail=f"an API key is required for this provider "
@@ -867,3 +1163,14 @@ def create_app() -> FastAPI:
         app.mount("/", RevalidatingStatic(directory=str(web), html=True), name="site")
 
     return app
+
+
+try:
+    from server.console import install as _install_console
+
+    _install_console()
+    from server.console import tap_streams
+
+    tap_streams()
+except Exception:
+    pass
