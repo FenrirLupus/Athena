@@ -12,6 +12,7 @@ import math
 from pathlib import Path
 
 from core import profile as profile_mod
+from core.context_window import effective_window
 
 CHARS_PER_TOKEN = 4.0          # the raw estimate; the *calibrated* ratio comes from what providers bill
 # Measured on real turns, the truth is 1.5-2.0x this (see context/calibration.py). Everything below takes a
@@ -87,7 +88,7 @@ def build(instructions: str, channel_root: Path, history: list[dict], user_text:
     `history` already ends with the user message: the caller stores the turn before building, and
     appending it again here would put every tool result before the last user message.
     """
-    win = int((cfg.get("model") or {}).get("window") or 32768)
+    win = effective_window(cfg)
     alloc = allocate(win, cfg)
 
     # labelled parts, so the report can say WHICH block costs what — a total of ~890 tokens tells you to

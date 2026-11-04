@@ -122,6 +122,16 @@ const Live = (() => {
           queueNote.hidden = !waiting || !working;
           queueNote.textContent = waiting ? `· ${waiting} more waiting` : '';
         }
+        // an idle agent is not thinking, and it is not waiting on anyone: clear the peer line too, or the last
+        // sentence it showed stays on screen after the turn ends
+        if (inn) {
+          inn.hidden = true;
+          const inLabel = inn.querySelector('#typing-peer, .typing-label');
+          if (inLabel) inLabel.textContent = '';
+          const inSuffix = inn.querySelector('.typing-suffix');
+          if (inSuffix) inSuffix.textContent = '';
+          inn.querySelectorAll('[data-wave]').forEach(wave => { wave.textContent = ''; });
+        }
       }
     }
 
@@ -186,7 +196,7 @@ const Live = (() => {
       const h = await getJSON('/health');
       fill({ provider: h.provider, model: h.model, window: h.window, version: h.version,
              status: h.status, warnings: (h.warnings || []).length ? h.warnings : 'none',
-             version_line: `Athena ${h.version} · ${h.provider} · ${h.model}` });
+             version_line: `Version · ${h.version} · ${String(h.channel || '').toUpperCase()}` });
     } catch {
       fill({ provider: 'offline', status: 'unreachable', version_line: 'Athena · offline' });
     }
@@ -315,12 +325,16 @@ const Live = (() => {
       state.awaiting = (found && found.awaiting) || [];
       state.channelState = (found && found.state) || 'idle';
       const dot = $('channel-state');
-      if (dot && found) {
+      // the typing indicator must update even when there is no status dot on the page: the dot was removed with the
+      // page header, and gating setTyping() behind it left the last "is thinking" sentence on screen for ever
+      if (found) {
         const channelState = found.state || (found.busy ? 'working' : 'idle');
         const shown = wakingHeld() && channelState !== 'sleeping' ? 'waking' : channelState;
-        dot.textContent = shown;
-        dot.className = `dot ${shown}`;
-        dot.dataset.state = shown;
+        if (dot) {
+          dot.textContent = shown;
+          dot.className = `dot ${shown}`;
+          dot.dataset.state = shown;
+        }
         setTyping(channelState, found.queue_depth, found.awaiting || [], found.inbound_from || "");
         const power = $('power');
         if (power) {
@@ -549,6 +563,19 @@ const Live = (() => {
   }
 
   /* ---------- resources: Home cards + Chat tab ---------- */
+  function paintCtx(percent, summary) {
+    // the number and the bar are one fact; filling them from two places is how they disagree
+    fill({ ctx_summary: summary });
+    const pct = Math.max(0, Math.min(100, Number(percent) || 0));
+    const bar = document.querySelector('.ctx-bar');
+    const barFill = document.querySelector('.ctx-bar-fill');
+    if (barFill) barFill.style.width = `${pct.toFixed(1)}%`;
+    if (bar) bar.setAttribute('aria-valuenow', String(Math.round(pct)));
+  }
+
+  // footer tick: independent of the page poll, so the figure is current on every page
+  setInterval(() => { if (!document.hidden) refreshFooterCtx(); }, POLL_MS * 2);
+
   async function refreshFooterCtx() {
     // Settings and New-agent showed a permanent "—": the figure was filled only inside refreshResources, which
     // returns early when the page has no resources panel. One lane is asked for, not all of them.
@@ -564,14 +591,14 @@ const Live = (() => {
         if (names.length) { state.channels = names; lane = names[0]; }
       } catch (_) { /* the footer stays honest about not knowing */ }
     }
-    if (!lane) { fill({ ctx_summary: 'no agent yet' }); return; }
+    if (!lane) { paintCtx(0, 'no agent yet'); return; }
     try {
       const r = await getJSON(`/agents/${encodeURIComponent(lane)}/resources`);
       const used = r.prompt_tokens_est ?? 0;
       const total = r.window || 32768;
       const pct = total ? (used / total) * 100 : 0;
-      fill({ ctx_summary: `${pct.toFixed(1)}% · ${used.toLocaleString()} / ${total.toLocaleString()} tok` });
-    } catch (_) { fill({ ctx_summary: '—' }); }
+      paintCtx(pct, `${pct.toFixed(1)}% · ${used.toLocaleString()} / ${total.toLocaleString()} tok`);
+    } catch (_) { paintCtx(0, '—'); }
   }
 
   async function refreshResources() {
@@ -589,7 +616,7 @@ const Live = (() => {
         p.className = 'muted';
         p.textContent = 'no agent has been used yet';
         host.append(p);
-        fill({ ctx_summary: 'no agent yet' });
+        paintCtx(0, 'no agent yet');
         return;
       }
     }
@@ -630,7 +657,7 @@ const Live = (() => {
           const used = data.prompt_tokens_est ?? 0;
           const total = data.window || 32768;
           const pct = total ? (used / total) * 100 : 0;
-          fill({ ctx_summary: `${pct.toFixed(1)}% · ${used.toLocaleString()} / ${total.toLocaleString()} tok` });
+          paintCtx(pct, `${pct.toFixed(1)}% · ${used.toLocaleString()} / ${total.toLocaleString()} tok`);
         }
 
         const windowTokens = data.window || 32768;
@@ -758,7 +785,7 @@ const Live = (() => {
 
   async function togglePower() {
     const button = $('power');
-    const meta = $('chat-meta');
+    const meta = $('thread-note');   // status messages belong in the thread, not the composer band
     const sleeping = state.channelState === 'sleeping';
     button.disabled = true;
     if (sleeping) markWaking();
@@ -857,7 +884,7 @@ const Live = (() => {
   /* ---------- chat: sending ---------- */
   async function sendTurn() {
     const input = $('chat-text');
-    const meta = $('chat-meta');
+    const meta = $('thread-note');   // status messages belong in the thread, not the composer band
     const button = $('chat-send');
     const typed = (input?.value || '').trim();
     const attached = state.attachments.slice();
@@ -888,8 +915,7 @@ const Live = (() => {
     try {
       const result = await postJSON(`/agents/${encodeURIComponent(state.channel)}/turn`, { text });
       if (meta) {
-        meta.textContent = `${result.status} · ${result.calls ?? '?'} call(s) · ` +
-          `${result.tool_rounds ?? 0} tool round(s) · ${result.seconds ?? '?'} s`;
+        // the footer carries a button and a text field, not the turn's internal counters
       }
       await refreshThread(true);
       await refreshLanes();
@@ -905,38 +931,6 @@ const Live = (() => {
     }
   }
 
-  async function createLane(name) {
-    const clean = (name || '').trim().replace(/[^A-Za-z0-9_-]/g, '-').slice(0, 32);
-    if (!clean) return;
-    // creating a lane is a POST to /agents; the server validates the label and mints the id
-    let problem = '';
-    try {
-      const resp = await fetch('/agents', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ name: clean }),
-      });
-      if (!resp.ok) {
-        const body = await resp.json().catch(() => ({}));
-        problem = body.detail || `could not create ${clean} (${resp.status})`;
-      }
-    } catch (err) {
-      problem = `could not create ${clean}: ${err}`;
-    }
-    if (problem) {
-      state.lastError = problem;
-      if (typeof toast === 'function') toast(problem); else console.warn(problem);
-      await refreshLanes();
-      return;
-    }
-    state.channel = clean;
-    state.signature = '';
-    await refreshLanes();
-    await refreshThread(true);
-    await refreshResources();
-    await refreshFooterCtx();
-  }
-
   /* ---------- boot ---------- */
   function start() {
     state.page = document.body.dataset.page || 'home';
@@ -947,12 +941,6 @@ const Live = (() => {
       if (requested) state.channel = requested;
       $('chat-send')?.addEventListener('click', (event) => { event.preventDefault(); sendTurn(); });
       $('composer')?.addEventListener('submit', (event) => { event.preventDefault(); sendTurn(); });
-      $('channel-new')?.addEventListener('submit', async (event) => {
-        event.preventDefault();
-        const input = $('channel-new-name');
-        await createLane(input?.value || '');
-        if (input) input.value = '';
-      });
     }
 
     wireAttach();

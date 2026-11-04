@@ -18,6 +18,7 @@ import traceback
 from context import compress as compress_mod
 from context import stack as stack_mod
 from core.budget import IterationBudget
+from core.context_window import effective_window
 
 
 class TurnResult(dict):
@@ -255,7 +256,7 @@ def _maybe_compress(session, cfg: dict, factor: float = 1.0, provider=None,
     """
     b = cfg.get("budget") or {}
     c = cfg.get("compression") or {}
-    win = int((cfg.get("model") or {}).get("window") or 32768)
+    win = effective_window(cfg)
     soft = float(c.get("threshold_soft_pct", 80.0)) / 100.0
     hard = float(c.get("threshold_hard_pct", 90.0)) / 100.0
     history_share = int(win * float(b.get("history_pct", 30.0)) / 100 + 0.5)

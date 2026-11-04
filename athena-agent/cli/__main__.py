@@ -13,6 +13,7 @@ import os
 import sys
 import time
 from pathlib import Path
+from core.context_window import effective_window
 
 
 def pathlib_root(root):
@@ -127,7 +128,7 @@ def main(argv: list[str] | None = None) -> int:
         for warning in cfg.get("_warnings") or []:
             print(f"config warning: {warning}", file=sys.stderr)
         print(f"athena 0.0.1 · provider={(cfg.get('model') or {}).get('provider')} "
-              f"· window={(cfg.get('model') or {}).get('window')} · http://{host}:{port}"
+              f"· window={effective_window(cfg)} · http://{host}:{port}"
               + (" · reload on change" if reload else ""))
         if reload:
             # an import string, not an app object: the reloader runs the app in a child so it can swap it

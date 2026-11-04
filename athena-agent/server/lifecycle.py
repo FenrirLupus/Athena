@@ -22,6 +22,7 @@ from typing import Protocol
 
 from core import agentconfig
 from core import channelstate
+from core.context_window import effective_window
 
 
 class ChannelAsleep(ValueError):
@@ -129,8 +130,7 @@ class ChannelLifecycle:
         try:
             model_cfg = agentconfig.read(channel.root).get("model") or {}
             local_name = agentconfig.local_model_name(model_cfg)
-            window = int(model_cfg.get("window")
-                         or (self.registry.cfg.get("model") or {}).get("window") or 0)
+            window = effective_window(model_cfg or self.registry.cfg)
             problems = []
             if window < 32768:
                 problems.append(f"window {window} below the 32768 floor")

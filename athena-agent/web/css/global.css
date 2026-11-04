@@ -4,22 +4,7 @@
  * a page can be restyled without touching the site, and the site can be restyled without touching a
  * page — the same separation the HTML and the JSON keep.
  */
-:root {
-  --bg: #0e1014;
-  --bg-soft: #14171d;
-  --panel: #171b22;
-  --panel-2: #1d222b;
-  --line: #262c36;
-  --line-soft: #1f242d;
-  --text: #e6e9ef;
-  --muted: #8b93a1;
-  --dim: #5f6674;
-  --accent: #7dd3fc;
-  --accent-2: #a5b4fc;
-  --ok: #4ade80;
-  --warn: #fbbf24;
-  --bad: #f87171;
-  --mono: ui-monospace, "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+:root {  --mono: ui-monospace, "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
   --sans: ui-sans-serif, system-ui, "Inter", "Segoe UI", Roboto, sans-serif;
 }
 
@@ -42,7 +27,7 @@ body {
 /* 1 · global header */
 #global-header {
   border-bottom: 1px solid var(--line);
-  background: linear-gradient(180deg, #131720, #0e1014);
+  background: linear-gradient(180deg, var(--header-top), var(--bg));
 }
 
 .header-top {
@@ -214,10 +199,35 @@ body[data-layout="app"] .header-top { padding: 10px 20px 6px; }
   position: sticky;
   top: 0;
   z-index: 50;
-  background: #2a1212;
-  border-bottom: 1px solid #4a1f1f;
-  color: #f8b4b4;
+  background: var(--error-bg);
+  border-bottom: 1px solid var(--error-line);
+  color: var(--error-text);
   font-family: var(--mono);
   font-size: 12px;
   padding: 8px 16px;
 }
+
+/* the topbar and the three-column footer it sits above */
+#topbar {
+  display: flex; align-items: center; gap: 12px;
+  height: 100%; padding: 0 1.25%;
+  background: var(--bg-soft); border-bottom: 1px solid var(--line);
+}
+
+.footer-col[data-col="ctx"] { align-items: flex-start; }
+
+.ctx-bar {
+  display: block; width: 100%; height: 3px; margin-top: 4px;
+  background: var(--line-soft); border-radius: 2px; overflow: hidden;
+}
+.ctx-bar-fill {
+  display: block; height: 100%; width: 0%;
+  background: var(--accent); transition: width .3s ease;
+}
+
+.footer-button {
+  font: inherit; font-size: 11.5px; color: var(--text); cursor: pointer;
+  background: var(--panel-2); border: 1px solid var(--line);
+  border-radius: 4px; padding: 3px 9px;
+}
+.footer-button:hover { border-color: var(--accent-line); color: var(--accent); }

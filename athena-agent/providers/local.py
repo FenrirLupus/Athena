@@ -33,6 +33,7 @@ import httpx
 
 from models import store as model_store
 from providers.base import BaseProvider, ProviderError
+from core.context_window import effective_window
 
 # the tiered runtime lives beside this file and is executed by model.local.python
 RUNTIME = Path(__file__).with_name("offload_runtime.py")
@@ -46,7 +47,9 @@ class LocalServer:
         self.cfg = cfg
         self.backend = str(local.get("backend") or "transformers").lower()
         self.port = int(local.get("port") or 8080)
-        self.ctx = int(local.get("ctx") or model.get("window") or 32768)
+        # the local server's own ctx must cover the window in force, not a stale model.window: with a provider
+        # figure above the floor it would otherwise truncate at the old number
+        self.ctx = int(local.get("ctx") or effective_window({"model": model}))
         self.name = str(local.get("name") or "")
         self.repo = str(local.get("repo") or "")
         self.file = str(local.get("file") or "")

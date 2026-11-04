@@ -66,7 +66,7 @@ def save(data: dict) -> None:
 
 def register(provider: str, *, format: str = "openai", base_url: str = "",
              key_name: str = "", scope: str = "global", agent: str = "",
-             models: list[str] | None = None) -> dict:
+             models: list[str] | None = None, contexts: dict[str, int] | None = None) -> dict:
     """Record a provider (and optionally one of its keys). Never stores a key value."""
     provider = (provider or "").strip().lower()
     if not provider:
@@ -84,6 +84,8 @@ def register(provider: str, *, format: str = "openai", base_url: str = "",
                     if not (k.get("name") == name and k.get("scope") == scope and k.get("agent") == agent)]
         existing.append({"name": name, "scope": scope, "agent": agent})
         entry["keys"] = existing
+    if contexts is not None:
+        entry["contexts"] = {str(k): int(v) for k, v in contexts.items() if v}
     if models is not None:
         entry["models"] = list(models)
         entry["models_updated"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -130,3 +132,68 @@ def fetch_models(base_url: str, key: str = "", timeout: float = 20.0) -> list[st
         elif isinstance(row, str):
             out.append(row)
     return sorted(set(out))
+
+
+def set_contexts(provider: str, contexts: dict[str, int]) -> dict:
+    """Record the context window each model published, keyed by model id.
+
+    Only providers that publish one have entries here. OpenAI and Anthropic return ids alone, so the configured floor
+    answers for them; DeepSeek does publish a figure (`context_window`), which is why the live install adopts one.
+    """
+    clean = {str(k): int(v) for k, v in (contexts or {}).items() if v}
+    return register(provider, contexts=clean)
+
+
+def context_of(provider: str, model: str) -> int | None:
+    """The published window for one model, or None when the provider never published one."""
+    block = (load().get((provider or "").lower()) or {}).get("contexts") or {}
+    value = block.get(str(model))
+    return int(value) if value else None
+
+
+def fetch_model_rows(base_url: str, key: str = "", timeout: float = 20.0) -> list[dict]:
+    """The raw entries from `GET /models`, unfiltered.
+
+    A provider that publishes a context length puts it here — OpenRouter as `context_length`, vLLM as `max_model_len`.
+    OpenAI, Anthropic and DeepSeek return ids and nothing else, so for those this yields rows with no window and the
+    configured floor remains the answer.
+    """
+    import httpx
+
+    if not base_url:
+        return []
+    headers = {"Authorization": f"Bearer {key}"} if key else {}
+    url = base_url.rstrip("/")
+    if not url.endswith("/v1"):
+        url += "/v1"
+    try:
+        with httpx.Client(timeout=timeout) as client:
+            resp = client.get(f"{url}/models", headers=headers)
+            resp.raise_for_status()
+            payload = resp.json()
+    except Exception:                                # noqa: BLE001 — a failed refresh is not an error state
+        return []
+    rows = payload.get("data") if isinstance(payload, dict) else payload
+    return [row for row in (rows or []) if isinstance(row, dict)]
+
+
+CONTEXT_FIELDS = ("context_length", "max_model_len", "context_window", "max_context_length")
+
+
+def contexts_from_rows(rows: list[dict]) -> dict[str, int]:
+    """Model id → published window, for whichever of the known field names each entry uses."""
+    out: dict[str, int] = {}
+    for row in rows or []:
+        ident = str(row.get("id") or row.get("name") or "").strip()
+        if not ident:
+            continue
+        for field in CONTEXT_FIELDS:
+            value = row.get(field)
+            if value in (None, "", 0):
+                continue
+            try:
+                out[ident] = int(value)
+            except (TypeError, ValueError):
+                continue
+            break
+    return out

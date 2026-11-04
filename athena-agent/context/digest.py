@@ -14,6 +14,7 @@ name is included so the digest can cite its own provenance.
 from __future__ import annotations
 
 import re
+from core.context_window import effective_window
 
 MAX_TRANSCRIPT_CHARS = 24_000        # the digest prompt must not itself become the context problem
 
@@ -73,7 +74,7 @@ def model_digest(provider, evicted: list[dict], snapshot_name: str, cfg: dict) -
     if not evicted:
         return ""
     comp = cfg.get("compression") or {}
-    win = int((cfg.get("model") or {}).get("window") or 32768)
+    win = effective_window(cfg)
     # SUMMARY.md must be at least `target_min_pct` of the window, so that is the default ceiling. 0 = compute.
     max_tokens = int(comp.get("digest_max_tokens") or 0) \
         or int(win * float(comp.get("target_min_pct", 20.0)) / 100)

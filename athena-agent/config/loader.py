@@ -87,6 +87,12 @@ def _validate(cfg: dict) -> None:
         # is sized against — comparing to model.window (not a literal) keeps this true at 64K and 128K
         ctx = int(local.get("ctx") or 0)
         window = int(model.get("window") or 0)
+        try:
+            from core.context_window import resolve as _resolve_window
+            window = int(_resolve_window(model).get("window") or window)
+        except Exception:                          # noqa: BLE001 — a broken window block is reported elsewhere
+            pass
+
         if ctx and ctx < window:
             raise ConfigError(
                 f"model.local.ctx: {ctx} is below model.window ({window}) — the server would silently "
@@ -95,6 +101,13 @@ def _validate(cfg: dict) -> None:
     if window < 32768:
         raise ConfigError(
             f"model.window: {window} is below the 32,768 minimum — the prompt stack cannot hold a conversation")
+    local_floor = model.get("context_window_local")
+    if local_floor not in (None, "", 0):
+        floor = int(local_floor)
+        if floor < 32768:
+            raise ConfigError(
+                f"model.context_window_local: {floor} is below the 32,768 minimum — it is the value the effective "
+                f"window falls back to, so a smaller floor silently shrinks the prompt stack")
     out_tok = int(model.get("max_output_tokens") or 0)
     if out_tok <= 0 or out_tok >= window:
         raise ConfigError(

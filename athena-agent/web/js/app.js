@@ -113,5 +113,5 @@ const App = (() => {
   }
 
   document.addEventListener('DOMContentLoaded', boot);
-  return { boot };
+  return { boot, showError };
 })();

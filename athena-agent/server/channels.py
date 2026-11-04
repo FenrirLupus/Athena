@@ -14,6 +14,15 @@ from pathlib import Path
 
 from context import stack as stack_mod
 from core import agentconfig
+from core import context_window as _window_mod
+
+
+def _effective_window(model_cfg: dict) -> int:
+    """One window figure for every reader: the provider's if it is at least the floor, else the floor."""
+    try:
+        return _window_mod.resolve(model_cfg or {})["window"]
+    except ValueError:
+        return _window_mod.FLOOR
 from core.permissions import PermissionManager
 from core.security import Ledger
 from core import identity
@@ -666,8 +675,7 @@ Resolution comes first: the ref is resolved to a label before any path is built,
                     "provider": model_cfg.get("provider") or "",
                     "model": model_cfg.get("name") or agentconfig.local_model_name(model_cfg) or "",
                     # each agent may declare its own window; the global figure is only the fallback
-                    "window": int(model_cfg.get("window")
-                                  or (self.cfg.get("model") or {}).get("window") or 0),
+                    "window": _effective_window(model_cfg or (self.cfg.get("model") or {})),
                     "configured": bool(model_cfg.get("name") or model_cfg.get("base_url")
                                        or agentconfig.local_model_name(model_cfg)),
                                      "last_author": "",
@@ -746,6 +754,16 @@ Resolution comes first: the ref is resolved to a label before any path is built,
             channels = list(self.channels.values())
         return [self._row(channel) for channel in channels]
 
+    def _lane_model(self, name: str) -> dict:
+        """The model block this lane's turns actually use — not the installation's."""
+        try:
+            from core import agentconfig
+
+            lane = agentconfig.read(self.agents_dir / name)
+            return (agentconfig.as_cfg(lane, self.cfg).get("model") or {})
+        except Exception:                          # noqa: BLE001 — a broken lane file falls back to the global
+            return self.cfg.get("model") or {}
+
     def resources(self, name: str) -> dict:
         channel = self.channel(name)
         last = dict(channel.last_result or {})
@@ -753,7 +771,7 @@ Resolution comes first: the ref is resolved to a label before any path is built,
         # before the first turn there is no report — size the blocks from the config so the
         # panel is useful from the moment the channel exists
         alloc = prompt.get("allocated") or stack_mod.allocate(
-            int((self.cfg.get("model") or {}).get("window") or 32768), self.cfg)
+            _effective_window(self._lane_model(name)), self.cfg)
         # before the first turn there is no report, and a footer that says 0 tokens while the thread has
         # 26 messages is worse than no footer: estimate from the transcript instead of reporting nothing
         est = prompt.get("prompt_tokens_est")
@@ -763,7 +781,7 @@ Resolution comes first: the ref is resolved to a label before any path is built,
 
         return {
             "channel": name,
-            "window": prompt.get("window") or int((self.cfg.get("model") or {}).get("window") or 32768),
+            "window": _effective_window(self._lane_model(name)),
             "prompt_tokens_est": est,
             "budget": last.get("budget"),
             "history_tokens": prompt.get("history_tokens"),

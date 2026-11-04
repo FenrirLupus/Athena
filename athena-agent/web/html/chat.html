@@ -10,16 +10,18 @@
 -->
 <html lang="en">
 <head>
+  <script src="../js/theme.js"></script>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Chat · Athena</title>
+  <link rel="stylesheet" href="../css/palette.css">
   <link rel="stylesheet" href="../css/global.css">
   <link rel="stylesheet" href="../css/page.css">
 </head>
 <body data-page="chat" data-layout="app">
 
   <!-- 1 · GLOBAL HEADER — information only -->
-  <header id="global-header" data-layer="1">
+  <header id="topbar" data-layer="1">
     <div class="header-top">
       <div class="brand">
         <span class="brand-mark">Athena</span>
@@ -33,37 +35,30 @@
       </div>
     </div>
   </header>
-
-  <!-- 2 · GLOBAL NAVBAR — pages only -->
-  <nav class="global-nav" aria-label="Main navigation">
-    <a class="logo" href="../index.html">Athena</a>
+    <nav class="global-nav" aria-label="Main navigation">
     <div class="nav-links">
-      <a class="nav-link" href="../index.html" data-page="home">Home</a>
-      <a class="nav-link active" href="chat.html" data-page="chat">Chat</a>
-      <a class="nav-link" href="settings.html" data-page="settings">Settings</a>
+          <a class="nav-link" href="../index.html" data-page="home">Home</a>
+          <a class="nav-link active" href="chat.html" data-page="chat">Chat</a>
+          <a class="nav-link" href="settings.html" data-page="settings">Settings</a>
+        </div>
+    <div class="nav-tools">
+      <button class="nav-icon" id="bell" type="button" aria-label="Notifications" aria-haspopup="dialog" aria-expanded="false">
+        <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true" focusable="false">
+          <path d="M8 1.6a3.6 3.6 0 0 0-3.6 3.6v2.5L3 10.2h10L11.6 7.7V5.2A3.6 3.6 0 0 0 8 1.6z" fill="currentColor"/>
+          <path d="M6.6 11.4a1.5 1.5 0 0 0 2.8 0z" fill="currentColor"/>
+        </svg>
+      </button>
+      <button class="nav-avatar" id="avatar" type="button" aria-label="Account">DJ</button>
     </div>
   </nav>
+
+  <!-- 2 · GLOBAL NAVBAR — pages only -->
 
   <!-- 3 · GLOBAL BODY -->
   <main id="global-body" data-layer="3">
     <div id="page-root" class="app">
 
       <!-- 5 · PAGE HEADER — 6 · PAGE NAVBAR inside it -->
-      <header id="page-header" data-layer="5">
-        <div class="channel-head">
-          <span class="channel-hash">#</span>
-          <h1 id="channel-title">default</h1>
-          <span class="dot idle" id="channel-state">idle</span>
-        </div>
-        <nav class="page-nav" aria-label="Page navigation" role="tablist">
-          <button class="pill tab active" type="button" role="tab" data-tab="thread"
-                  aria-selected="true" aria-controls="panel-thread">Thread</button>
-          <button class="pill tab" type="button" role="tab" data-tab="resources"
-                  aria-selected="false" aria-controls="panel-resources">Resources</button>
-        </nav>
-        <!-- not a tab: a tablist whose children are not all tabs is announced wrongly, and Tab stopped here -->
-        <button class="pill" id="power" type="button" title="park or wake this channel">sleep</button>
-      </header>
 
       <!-- 7 · PAGE BODY -->
       <section id="page-body" data-layer="7">
@@ -76,15 +71,15 @@
           <ul class="rail-list" id="channel-list">
             <li class="rail-empty muted small">no agents yet</li>
           </ul>
-          <form class="rail-new" id="channel-new">
-            <input class="channel-new-input" id="channel-new-name" type="text" placeholder="new agent"
-                   aria-label="new agent name" maxlength="32" autocomplete="off">
-            <button class="btn btn-quiet" type="submit" aria-label="create channel">+</button>
-          </form>
-          <p class="rail-foot muted small" id="tools-line">tools: —</p>
         </aside>
 
         <div class="panels">
+          <nav class="panel-tabs" role="tablist" aria-label="conversation views">
+            <button class="pill tab active" type="button" role="tab" data-tab="thread"
+                    aria-selected="true" aria-controls="panel-thread">Thread</button>
+            <button class="pill tab" type="button" role="tab" data-tab="resources"
+                    aria-selected="false" aria-controls="panel-resources">Resources</button>
+          </nav>
           <div class="panel active" id="panel-thread" role="tabpanel">
             <div class="thread-legend">
               <span>→ outbound · this agent</span>
@@ -134,7 +129,6 @@
           <button class="btn btn-send" id="chat-send" type="submit">Send</button>
         </form>
         <ul class="attach-list" id="attach-list"></ul>
-        <div class="composer-meta muted small" id="chat-meta"></div>
       </footer>
     </div>
   </main>
@@ -142,21 +136,26 @@
   <!-- 4 · GLOBAL FOOTER — three columns: context use, version, endpoints -->
   <footer id="global-footer" data-layer="4">
     <div class="footer-inner">
-      <div class="footer-col">
-        <span class="footer-key">context</span>
+      <div class="footer-col" data-col="version">
+        <span class="footer-value" data-fill="version_line">Version · — · —</span>
+      </div>
+      <div class="footer-col" data-col="ctx">
+        <span class="footer-key">Context Window</span>
         <span class="footer-value" data-fill="ctx_summary">—</span>
+        <span class="ctx-bar" role="progressbar" aria-label="context window used"
+              aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span class="ctx-bar-fill"></span></span>
       </div>
-      <div class="footer-col">
-        <span class="footer-key">version</span>
-        <span class="footer-value" data-fill="version_line">Athena</span>
-      </div>
-      <div class="footer-col">
-        <span class="footer-key">api</span>
-        <span class="footer-links">
-          <a href="/health">/health</a>
-          <a href="/agents">/agents</a>
-          <a href="/config">/config</a>
-        </span>
+      <div class="footer-col" data-col="tools">
+        <button id="terminal-open" class="footer-button" type="button"
+                title="server operations, in realtime">Terminal</button>
+        <button id="theme-toggle" class="theme-switch" type="button" role="switch" aria-checked="false" aria-label="Light or dark theme">
+          <span class="theme-switch-track">
+            <span class="theme-switch-knob">
+              <svg class="icon-sun" viewBox="0 0 16 16" width="11" height="11" aria-hidden="true"><circle cx="8" cy="8" r="3.1" fill="currentColor"/><g stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><path d="M8 1v1.6M8 13.4V15M1 8h1.6M13.4 8H15M3 3l1.1 1.1M11.9 11.9L13 13M13 3l-1.1 1.1M4.1 11.9L3 13"/></g></svg>
+              <svg class="icon-moon" viewBox="0 0 16 16" width="11" height="11" aria-hidden="true"><path d="M10.6 2.2a6 6 0 1 0 3.2 7.6 4.8 4.8 0 0 1-3.2-7.6z" fill="currentColor"/></svg>
+            </span>
+          </span>
+        </button>
       </div>
     </div>
   </footer>
@@ -210,5 +209,7 @@
   <script src="../js/live.js"></script>
   <script src="../js/app.js"></script>
   <script src="../js/approvals.js"></script>
+  <script src="../js/terminal.js"></script>
+  <script src="../js/page-specs.js"></script>
 </body>
 </html>

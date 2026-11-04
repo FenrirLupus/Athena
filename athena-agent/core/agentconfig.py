@@ -158,7 +158,8 @@ DEFAULTS = {
     "accent": "",
     "persona": {"name": "", "role": "", "tone": "", "boundaries": ""},
     "model": {"provider": "openai", "base_url": "", "name": "", "window": 32768,
-              "max_output_tokens": 1024, "temperature": 0.7, "local": ""},
+              "max_output_tokens": 1024, "temperature": 0.7, "local": "",
+              "context_window_local": None, "context_window_provider": None},
     "api_key": "",
 }
 
@@ -168,7 +169,12 @@ DEFAULTS = {
 # `plugins` is here so the section exists in the generated file and a lane's list survives a re-save. Its `enabled`
 # is legitimately blank — blank means "inherit the global ceiling", which is not the same as "no plugins".
 AGENT_SECTIONS = ("model", "plugins", "budget", "tools", "metrics", "compression")
-BLANK_BY_DESIGN = {"plugins": ("enabled",)}
+BLANK_BY_DESIGN = {
+    "plugins": ("enabled",),
+    # a lane has no floor of its own until one is set, and a provider-published window is absent until one is
+    # fetched: blank is the honest value in both cases
+    "model": ("context_window_local", "context_window_provider"),
+}
 
 PERSONA_TEMPLATE = """\
 # Agent configuration — the same settings and the same descriptions as the global config.yaml, because this file
@@ -431,7 +437,7 @@ def write(profile_root: Path, config: dict, base: dict | None = None) -> Path:
                     ("name", "role", "tone", "boundaries", "accent")},
         "model": {key: model.get(key) for key in
                   ("provider", "base_url", "name", "window", "max_output_tokens",
-                   "temperature", "key_name")},
+                   "temperature", "key_name", "context_window_local", "context_window_provider")},
     }
     # the effective global config supplies the values an agent has not overridden, so every key can be written
     if base is None:
@@ -539,8 +545,8 @@ def as_cfg(agent_cfg: dict, base_cfg: dict) -> dict:
             model["base_url"] = DEFAULT_BASE_URLS.get(provider, "")
         model["name"] = str(agent_model.get("name") or model.get("name") or "")
 
-    for key in ("window", "max_output_tokens", "temperature", "key_name"):
-        if agent_model.get(key):
+    for key in ("window", "max_output_tokens", "temperature", "key_name", "context_window_local", "context_window_provider"):
+        if agent_model.get(key) is not None:
             model[key] = agent_model[key]
 
     # the file lists budget / tools / metrics, so they must actually apply — an override that is documented and

@@ -13,6 +13,10 @@ model:
 
   # The provider's context window in tokens; the whole prompt stack is sized as a share of this.
   window: 32768
+  # The floor and the fallback, used when the provider publishes no window of its own. Below 32768 is refused.
+  context_window_local: 32768
+  # The figure the provider's /models reported for the model in use; 0 means none was published.
+  context_window_provider: 0
 
   # Hard ceiling on one reply, in tokens; the effective cap is the smaller of this and output_pct.
   max_output_tokens: 4096

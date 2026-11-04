@@ -80,7 +80,7 @@ const Wizard = (() => {
       ['provider', provider()],
       ['endpoint', isLocal() ? `models/${value('f-local')}` : (value('f-base-url') || '—')],
       ['model', value('f-model') || value('f-local') || '—'],
-      ['window', `${value('f-window') || 32768} tokens`],
+      ['context floor', `${value('f-window') || 32768} tokens (the provider's published window wins when larger)`],
       ['key', isLocal() ? 'not needed' : (value('f-api-key') ? 'will be saved to .secret' : 'reusing a saved key')],
     ];
     box.replaceChildren();
@@ -161,6 +161,7 @@ const Wizard = (() => {
         base_url: isLocal() ? '' : value('f-base-url'),
         name: value('f-model') || value('f-local'),
         window: Number(value('f-window') || 32768),
+        context_window_local: Number(value('f-window') || 32768),
         max_output_tokens: Number(value('f-max-tokens') || 1024),
         temperature: Number(value('f-temperature') || 0.7),
         local: isLocal() ? value('f-local') : '',

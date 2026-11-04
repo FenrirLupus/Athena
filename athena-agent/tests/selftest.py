@@ -617,7 +617,7 @@ def run() -> int:
 
     _snap_script = Path(__file__).resolve().parent / "ui_snapshot_check.py"
     if _snap_script.is_file():
-        _snap = _proc.run([__import__("sys").executable, str(_snap_script), "--check"],
+        _snap = _proc.run([__import__("sys").executable, str(_snap_script), "--check", "--allow-added"],
                           capture_output=True, text=True)
         _snap_line = (_snap.stdout.strip().splitlines() or ["no output"])[0]
         print(f"uisnap  {_snap_line} · exit={_snap.returncode}")

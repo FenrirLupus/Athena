@@ -12,6 +12,8 @@ import re
 import time as _time
 from urllib.parse import unquote
 
+import json
+
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.staticfiles import StaticFiles
 from starlette.responses import JSONResponse, Response
@@ -55,6 +57,8 @@ class AgentModel(BaseModel):
     base_url: str = Field("", max_length=300)
     name: str = Field("", max_length=200)
     window: int = Field(32768, ge=32768)
+    # the floor a lane falls back to when the provider publishes nothing; the provider's own figure wins when it does
+    context_window_local: int | None = Field(None, ge=32768)
     max_output_tokens: int = Field(1024, ge=1)
     temperature: float = Field(0.7, ge=0.0, le=2.0)
     local: str = Field("", max_length=120)
@@ -224,12 +228,21 @@ def create_app() -> FastAPI:
         """
         return identity_mod.root_for(agents_dir, channel)
 
+    from core import context_window as window_mod
+
     @app.get("/health")
     def health() -> dict:
+        try:
+            window_facts = window_mod.resolve(cfg.get("model") or {})
+        except ValueError as exc:
+            window_facts = {"window": window_mod.FLOOR, "source": "config", "local": window_mod.FLOOR,
+                            "provider": None, "error": str(exc)}
         return {"status": "ok", "version": version_mod.text(), "channel": version_mod.channel(),
                 "provider": provider.name,
                 "model": (cfg.get("model") or {}).get("name"),
-                "window": (cfg.get("model") or {}).get("window"),
+                "window": window_facts["window"], "window_source": window_facts["source"],
+                "context_window_local": window_facts["local"],
+                "context_window_provider": window_facts["provider"],
                 "warnings": cfg.get("_warnings") or [],
                 # profiles whose sandbox/ or workspace/ had to be created at boot
                 "layout_repaired": _repaired,
@@ -251,11 +264,16 @@ def create_app() -> FastAPI:
             — the documented way to pin it — this route served the server's own token to any client holding it,
             and to the very UI it is meant to gate.
             """
+            # A key is secret by NAME, not by containing a word: matching any key that merely contains "token"
+            # also removed `model.max_output_tokens`, a setting the settings page displays.
+            def is_secret(name: str) -> bool:
+                key = name.lower()
+                return key in {"api_key", "apikey", "token", "secret", "password", "passwd", "private_key",
+                               "passphrase", "api_token", "auth_token", "access_token", "refresh_token"} or \
+                       key.endswith(("_token", "_secret", "_password", "_api_key", "_passphrase"))
+
             if isinstance(value, dict):
-                return {k: redact(v) for k, v in value.items()
-                        if not (isinstance(k, str) and any(word in k.lower()
-                                                           for word in ("api_key", "token", "secret", "password",
-                                                                        "private_key", "passphrase")))}
+                return {k: redact(v) for k, v in value.items() if not (isinstance(k, str) and is_secret(k))}
             if isinstance(value, list):
                 return [redact(v) for v in value]
             return value
@@ -559,6 +577,7 @@ def create_app() -> FastAPI:
                 # a tool result is inbound to the agent, and naming the tool is the difference between
                 # "something came back" and "echo came back"
                 entry["tool_name"] = msg.get("name") or ""
+                entry["tool_call_id"] = msg.get("tool_call_id") or ""
             if msg.get("tool_calls"):
                 entry["tool_calls"] = [c.get("name") for c in msg["tool_calls"]]
             if msg.get("name"):
@@ -606,6 +625,23 @@ def create_app() -> FastAPI:
             watch.sweep()
         body = path.read_text(encoding="utf-8") if path.is_file() else "no report yet"
         return Response(content=body, media_type="text/markdown")
+
+    @app.get("/security/events")
+    def security_events(since: float | None = None, limit: int = 200,
+                        within: int | None = None, min_level: str = "info") -> dict:
+        """Ledger rows newer than `since`, oldest first, with the newest timestamp as the cursor.
+
+        Read-only: the ledger is the record, and a reader that could write it would be able to erase the evidence of
+        its own tampering. `since` is a unix timestamp; rows at or before it are skipped, so a caller can poll without
+        re-reading the file's whole history.
+        """
+        from server import ledger_view
+
+        try:
+            return ledger_view.read_events(security_folder, since=since, limit=limit,
+                                           within=within, min_level=min_level)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     # -- permissions: the one queue ----------------------------------------
     @app.get("/permissions")
@@ -721,7 +757,10 @@ def create_app() -> FastAPI:
         """
         from core import providerregistry as registry
         entry = registry.load().get(name.lower()) or {}
-        base_url = (req.base_url if req else "") or entry.get("base_url") or ""
+        # the registry may know the provider under another label (config says `openai`, provider.json says
+        # `deepseek`); fall back to the configured endpoint rather than refusing to ask
+        base_url = ((req.base_url if req else "") or entry.get("base_url")
+                    or (cfg.get("model") or {}).get("base_url") or "")
         # the key resolves by FORMAT plus the endpoint's conventional name (`DEEPSEEK_API_KEY`), not by the
         # provider's own label — `api_key("deepseek")` finds nothing because the file line is named for the host
         kind = (entry.get("format") or "openai").lower()
@@ -732,7 +771,28 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=502,
                                 detail=f"{name} returned no model list (check the base URL and key)")
         registry.set_models(name, found)
-        return {"provider": name.lower(), "models": found, "count": len(found)}
+        # where the provider publishes a context window, record it: that figure, not the config floor, is what the
+        # stack should be sized against. A provider that returns ids alone leaves this empty, by design.
+        published: dict = {}
+        try:
+            published = registry.contexts_from_rows(registry.fetch_model_rows(base_url, key))
+            if published:
+                registry.set_contexts(name, published)
+        except Exception:                            # noqa: BLE001 — never fail a model refresh over metadata
+            published = {}
+        # the published figure becomes the configured one only when it is for the model actually in use and at or
+        # above the floor; otherwise the response says why not, and the config is left alone
+        from core import context_window as window_mod
+
+        decision = window_mod.adoption(cfg.get("model") or {}, published)
+        if decision.get("adopt"):
+            try:
+                if window_mod.write_provider_window(agents_dir.parent / "config.yaml", decision["window"]):
+                    decision["written"] = str(agents_dir.parent / "config.yaml")
+            except OSError as exc:                    # noqa: BLE001 — a read-only config is not a failed refresh
+                decision.update({"adopt": False, "reason": f"could not write config.yaml: {exc}"})
+        return {"provider": name.lower(), "models": found, "count": len(found),
+                "context_windows": published, "adopted": decision}
 
     @app.get("/agents/{channel}/history")
     def history(channel: str, days: int = 3, before: str | None = None) -> dict:

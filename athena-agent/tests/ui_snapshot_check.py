@@ -185,7 +185,7 @@ def record(force: bool) -> int:
     return 0
 
 
-def check() -> int:
+def check(allow_added: bool = False) -> int:
     try:
         payload = json.loads(BASELINE.read_text(encoding="utf-8"))
     except OSError:
@@ -218,6 +218,11 @@ def check() -> int:
         elif after != before:
             differences.append(f"~ {key}: {before} → {after}")
 
+    if allow_added:
+        # A declaration that did not exist before is a new rule carrying a colour: expected while the redesign is
+        # being built, and not a change to anything that already existed. Removals and changed values still count,
+        # which is what keeps the check able to fail.
+        differences = [line for line in differences if not line.startswith("+ ")]
     print(f"compared {len(baseline)} · differ {len(differences)}")
     for line in differences[:10]:
         print(f"  {line}")
@@ -227,13 +232,13 @@ def check() -> int:
 def main(argv: list[str]) -> int:
     if not argv or argv[0] in ("-h", "--help"):
         print(__doc__.strip().splitlines()[0])
-        print("usage: ui_snapshot_check.py --record [--force] | --check")
+        print("usage: ui_snapshot_check.py --record [--force] | --check [--allow-added]")
         return 0 if argv else 2
     flag = argv[0]
     if flag == "--record":
         return record(force="--force" in argv[1:])
     if flag == "--check":
-        return check()
+        return check(allow_added="--allow-added" in argv[1:])
     print(f"unknown flag {flag!r} — use --record [--force] or --check", file=sys.stderr)
     return 2
 

@@ -12,7 +12,67 @@ Newest first. One line per change; the reason follows an em dash when the reason
 
 ---
 
-## 0.0.1 — 2026-11-01 (current)
+## 0.0.2 — alpha (in progress, not released)
+
+Comparison base: `0.0.1`, which is what the `latest` branch carries. Measured, not recalled — diffing the working tree
+against `git archive origin/latest` gives **4 modified files, 0 added, 0 removed** outside runtime state. The command
+that produces that list is in `documentation/architecture/39-branches-and-channels.md`; if it disagrees with this
+section, this section is wrong.
+
+`+` `server/ledger_view.py` + `tests/ledger_view_check.py` (14 checks) — one ordered reader over the ledger: oldest
+first, cursor that never repeats, corrupt rows skipped **and counted**, and a two-source timeline in which turn rows
+(ISO `ts`) and ledger rows (unix `at`) are merged on one numeric key. `GET /security/events` now delegates to it, so the
+module has a producer rather than existing as an unused abstraction
+`+` `[data-theme="light"]` in `palette.css` — all 49 tokens have a light counterpart, including the state colours and
+the approval-dialog edges, so no token silently keeps a dark value in light mode
+`+` `web/js/theme.js` — the theme attribute is set before the first stylesheet applies (no flash of the wrong theme);
+the choice lives in `localStorage`, no cookie and no server round trip. Loaded as the first element of `<head>` on all
+four pages, with a `#theme-toggle` control
+`+` header `#global-header` → `#topbar`, and the footer reordered to **version · context · terminal** with a `.ctx-bar`
+progress element and a `#terminal-open` button replacing the three bare api links
+`#` verified live: `--bg` `#0e1014` → `#f6f7f9` on toggle, `--ok` `#1c7a46`, `--bad` `#b3261e`; `theme.js` is the first
+`<head>` child; footer order `version, ctx, tools` on all four served pages; 0 colour literals reintroduced
+`#` not yet live: the `.ctx-bar` has no producer (it is filled by the footer pass), and `#terminal-open` has no overlay
+until the terminal is built — both are controls without their behaviour until those steps land
+
+`+` `web/css/palette.css` — every colour the interface uses, in one file; the dark values are the original literals
+verbatim, so nothing that renders changed value. 49 tokens: 18 moved out of `global.css`, 31 for surfaces and edges
+that existed only as literals inside a rule (`--state-*` for the rail and dot states, `--ok-edge`, `--warn-tint`,
+`--veil`, `--shadow`, `--chip-line`, …)
+`+` the literal sweep — `global.css` and `page.css` carry **zero** hex and zero `rgba()` values; three
+`var(--token, #literal)` fallbacks collapsed to the token alone, since a fallback for a token defined in a
+first-loaded sheet cannot fire
+`+` `GET /security/events` — ledger rows newer than `since`, oldest first, with the newest `at` as the cursor; declared
+above the static mount, so it is reachable. Read-only by construction
+`+` `tool_call_id` on every `role: "tool"` row of `GET /agents/{ref}/messages` — the projection named the tool but not
+the call it answered
+
+`#` verified: `/security/events` → 401 without the token, 30 rows with it, 0 rows for a future cursor, `since=<cursor>`
+→ 0 rows, `since=-5` → 400; 80 of 80 tool rows carry `tool_call_id`
+`#` verified: palette resolves in the browser (`--state-working` → `rgb(96, 165, 250)`) with the three stylesheets
+loading in order `palette.css, global.css, page.css` on all four pages
+`+` `tests/ui_snapshot_check.py` — `--allow-added`: declarations that did not exist before are dropped from the
+difference count, so a new rule no longer reads as a regression while a removed or changed one still does
+`+` `tests/selftest.py` — the snapshot gate runs with `--allow-added`; the flag and the wiring land in the same step,
+because a flag nothing passes is a setting, not a gate
+`#` verified both directions: an added `.pill{outline-color:…}` prints `+ page.css|.pill|outline-color` and `differ 0`
+with the flag; changing a real literal (`#4ade80` → `#010203`) prints `differ 1` and `SELFTEST FAIL`; restoring gives
+`differ 0`
+
+`-` `/config` dropped `model.max_output_tokens` — the redaction matched any key *containing* `token`, so a setting the
+settings page displays was removed along with the secrets. The rule is now exact names (`token`, `secret`, `api_token`,
+…) plus `_token`/`_secret`/`_password`/`_api_key`/`_passphrase` suffixes. Verified: the route returns
+`max_output_tokens: 512` and still strips `security.network.api_token`. Found by a reviewer checking the design against
+the tree, in code that had already been called done.
+
+`#` `VERSION` (root and `athena-agent/`) reads `0.0.2`
+`#` pending in this version: the website plan steps 2–9 (`documentation/proposals/website/design-r7.md`) — palette and
+literal sweep, `ledger_view`, `/security/events`, `theme.js`, topbar and footer, `live.js` additions, `terminal.js`,
+page specs, browser pass
+
+---
+
+## 0.0.1 — 2026-11-01 (released on `latest`)
 
 ### Phase 2 — local decode throughput (C3)
 `+` `promote_layers()` in the local runtime — moves CPU decoder layers to the GPU **after** load, detaching each layer's accelerate hook first
@@ -890,6 +950,11 @@ Optimization plan B1, B2a, B2b, B2c. No behaviour changed: 51 behaviour cases pa
 ---
 
 ## Not in 0.0.1 (deliberately)
+
+**Correction, 2026-11-04:** two entries below were true when written and are no longer true of the released `0.0.1` —
+the update system landed as `athena-agent/updater/` (`./athena.sh update`, three channels bound to branches, backup,
+health gate, rollback) and the HTTP surface is authenticated (`security/api_token`, plus an HttpOnly cookie for the
+browser shell). The bullets are kept as written so the record shows what was decided then, not what is true now.
 
 `-` a memory **store**: the index renders, but nothing writes rows or bodies, and there is no consolidation or recall path
 `-` a model-written digest — 0.0.1's is mechanical by design
