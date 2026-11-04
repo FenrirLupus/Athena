@@ -14,61 +14,70 @@ Newest first. One line per change; the reason follows an em dash when the reason
 
 ## 0.0.2 — alpha (in progress, not released)
 
-Comparison base: `0.0.1`, which is what the `latest` branch carries. Measured, not recalled — diffing the working tree
-against `git archive origin/latest` gives **4 modified files, 0 added, 0 removed** outside runtime state. The command
-that produces that list is in `documentation/architecture/39-branches-and-channels.md`; if it disagrees with this
-section, this section is wrong.
+Comparison base: `0.0.1`, which is what the `latest` branch carries. **Measured, not recalled** — this section is
+generated from
 
-`+` `server/ledger_view.py` + `tests/ledger_view_check.py` (14 checks) — one ordered reader over the ledger: oldest
-first, cursor that never repeats, corrupt rows skipped **and counted**, and a two-source timeline in which turn rows
-(ISO `ts`) and ledger rows (unix `at`) are merged on one numeric key. `GET /security/events` now delegates to it, so the
-module has a producer rather than existing as an unused abstraction
-`+` `[data-theme="light"]` in `palette.css` — all 49 tokens have a light counterpart, including the state colours and
-the approval-dialog edges, so no token silently keeps a dark value in light mode
-`+` `web/js/theme.js` — the theme attribute is set before the first stylesheet applies (no flash of the wrong theme);
-the choice lives in `localStorage`, no cookie and no server round trip. Loaded as the first element of `<head>` on all
-four pages, with a `#theme-toggle` control
-`+` header `#global-header` → `#topbar`, and the footer reordered to **version · context · terminal** with a `.ctx-bar`
-progress element and a `#terminal-open` button replacing the three bare api links
-`#` verified live: `--bg` `#0e1014` → `#f6f7f9` on toggle, `--ok` `#1c7a46`, `--bad` `#b3261e`; `theme.js` is the first
-`<head>` child; footer order `version, ctx, tools` on all four served pages; 0 colour literals reintroduced
-`#` not yet live: the `.ctx-bar` has no producer (it is filled by the footer pass), and `#terminal-open` has no overlay
-until the terminal is built — both are controls without their behaviour until those steps land
+```text
+git diff --name-status origin/latest..origin/alpha-0.0.2
+22 added · 28 modified · 0 deleted · +5384 / -306 lines
+```
 
-`+` `web/css/palette.css` — every colour the interface uses, in one file; the dark values are the original literals
-verbatim, so nothing that renders changed value. 49 tokens: 18 moved out of `global.css`, 31 for surfaces and edges
-that existed only as literals inside a rule (`--state-*` for the rail and dot states, `--ok-edge`, `--warn-tint`,
-`--veil`, `--shadow`, `--chip-line`, …)
-`+` the literal sweep — `global.css` and `page.css` carry **zero** hex and zero `rgba()` values; three
-`var(--token, #literal)` fallbacks collapsed to the token alone, since a fallback for a token defined in a
-first-loaded sheet cannot fire
-`+` `GET /security/events` — ledger rows newer than `since`, oldest first, with the newest `at` as the cursor; declared
-above the static mount, so it is reachable. Read-only by construction
-`+` `tool_call_id` on every `role: "tool"` row of `GET /agents/{ref}/messages` — the projection named the tool but not
-the call it answered
+If the diff disagrees with this section, this section is wrong.
 
-`#` verified: `/security/events` → 401 without the token, 30 rows with it, 0 rows for a future cursor, `since=<cursor>`
-→ 0 rows, `since=-5` → 400; 80 of 80 tool rows carry `tool_call_id`
-`#` verified: palette resolves in the browser (`--state-working` → `rgb(96, 165, 250)`) with the three stylesheets
-loading in order `palette.css, global.css, page.css` on all four pages
-`+` `tests/ui_snapshot_check.py` — `--allow-added`: declarations that did not exist before are dropped from the
-difference count, so a new rule no longer reads as a regression while a removed or changed one still does
-`+` `tests/selftest.py` — the snapshot gate runs with `--allow-added`; the flag and the wiring land in the same step,
-because a flag nothing passes is a setting, not a gate
-`#` verified both directions: an added `.pill{outline-color:…}` prints `+ page.css|.pill|outline-color` and `differ 0`
-with the flag; changing a real literal (`#4ade80` → `#010203`) prints `differ 1` and `SELFTEST FAIL`; restoring gives
-`differ 0`
+### Added
 
-`-` `/config` dropped `model.max_output_tokens` — the redaction matched any key *containing* `token`, so a setting the
-settings page displays was removed along with the secrets. The rule is now exact names (`token`, `secret`, `api_token`,
-…) plus `_token`/`_secret`/`_password`/`_api_key`/`_passphrase` suffixes. Verified: the route returns
-`max_output_tokens: 512` and still strips `security.network.api_token`. Found by a reviewer checking the design against
-the tree, in code that had already been called done.
+`+` **an Agents page of its own** (`web/html/agents.html`, `web/js/agents-page.js`) — one profile at a time as a
+printed card: portrait, vendor, model, key scope and the persona fields, edited in place. Its bar lists every agent
+alphabetically with the built-in `default` pinned first, with search, an A–Z/Z–A sort, Create, and a Delete that
+requires the confirmation button to be held for fifteen seconds
+`+` **persona fields** — first name, last name, nickname, likes, dislikes, bio, birth date (month/day/year) and an
+rgba accent, carried through `PersonaModel` and the config writer
+`+` **avatar storage** — `GET/POST /agents/{channel}/avatar`, copies saved as `avatar-0<n>.png` under each profile's
+`avatars/`, a `selected` marker so a profile keeps its picture, and a library that pages through them
+`+` **3×3 guided cropper** — the grid is a guide; the image is dragged, nudged with two sliders and zoomed with the
+wheel, then drawn to 1024×1024 (`web/js/console-tap.js` adds the console half)
+`+` **per-agent user profiles** — `GET/POST /user/profile?channel=<lane>` writes `profiles/<lane>/user.json`, so what
+one agent knows about the person is not what another does
+`+` **site-wide accent** (`web/js/accent.js`) — the selected agent's accent becomes `--accent`/`--accent-line`, so
+buttons, links, focus rings and borders follow the agent in view
+`+` **console ring** (`server/console.py`) — stdout and stderr mirrored into a bounded buffer and served from a cursor,
+so the terminal shows what the server printed; `/console/history` pages it 128 lines by date
+`+` **outcome vocabulary** (`core/outcomes.py`) — warning / caution / critical, with `classify`, `summarise` and a
+`/diagnostics` route that folds the turn log through them
+`+` `web/js/rail-order.js`, `rail-avatars.js`, `thread-avatars.js` — the chat rail reads avatar · profile · agent ·
+status on one 32px line and keeps its pictures through every re-render
 
-`#` `VERSION` (root and `athena-agent/`) reads `0.0.2`
-`#` pending in this version: the website plan steps 2–9 (`documentation/proposals/website/design-r7.md`) — palette and
-literal sweep, `ledger_view`, `/security/events`, `theme.js`, topbar and footer, `live.js` additions, `terminal.js`,
-page specs, browser pass
+### Fixed
+
+`-` **notification avatars were destroyed as they loaded** — `avatar()` set `textContent = ""` on the load event,
+which replaces *all* children including the `<img>` just appended; blank discs were the success case and the one
+lettered avatar was the failure case. `replaceChildren(img)` keeps the picture, and a cached miss stops a lane
+without an avatar being re-requested every poll
+`-` **the Agents page was a copy with the wrong names** — no `app.js` (so `Live.start()` never ran), footer ids where
+`live.js` fills `[data-fill]`, footer classes that exist in no stylesheet, a 0×0 theme switch, no `#acct-veil`, and a
+`Settings · Athena` title. Rebuilt on the settings shell
+`-` **the settings page kept its Agents block** — filtered out of the index but left as a child of `#page-body`, so it
+rendered over the card list
+`-` **the user profile was global** — one `~/.athena/user.json` for every agent; now one per profile
+`-` **rate limiting refused the page's own assets** — a 429 on a stylesheet left the page bare and on a script left it
+half-built; `/css/`, `/js/` and `/favicon` are exempt
+`-` **`box-sizing` and grid-row faults on the agent card** — the portrait collapsed to a sliver and the persona inputs
+to zero height because the card was pinned to 90% of a short band; it now grows and the body scrolls
+
+### Changed
+
+`#` the settings page is two panels (20% / 80%) with alphabetical bullet cards, one category shown at a time and each
+block collapsible
+`#` the chat rail collapses to a `clamp(30px, 2.5%, 80px)` strip with a toggle that stays in place
+`#` the account window is the same licence card as an agent's, for the person, with a selectable avatar and an accent
+
+### Files
+
+```text
+added     core/context_window.py, core/outcomes.py, server/console.py, server/ledger_view.py, tests/context_window_check.py, tests/ledger_view_check.py, tests/outcomes_check.py, web/css/palette.css, web/html/agents.html, web/js/accent.js, web/js/account.js, web/js/agents-page.js, web/js/console-tap.js, web/js/notif.js, web/js/page-specs.js, web/js/rail-avatars.js, web/js/rail-order.js, web/js/rail-toggle.js, web/js/settings-panels.js, web/js/terminal.js, web/js/theme.js, web/js/thread-avatars.js
+
+modified  VERSION, CHANGELOG.md, VERSION, cli/__main__.py, config/defaults.yaml, config/loader.py, context/digest.py, context/stack.py, core/agentconfig.py, core/loop.py, core/netdefense.py, core/providerregistry.py, providers/local.py, server/app.py, server/channels.py, server/lifecycle.py, tests/run_gate.sh, tests/selftest.py, tests/ui_snapshot_check.py, web/css/global.css, web/css/page.css, web/html/chat.html, web/html/new-agent.html, web/html/settings.html, web/index.html, web/js/app.js, web/js/live.js, web/js/wizard.js
+```
 
 ---
 
