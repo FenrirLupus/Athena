@@ -1,7 +1,0 @@
-{
-  "name": "discord",
-  "category": "message_platform",
-  "description": "The Discord message-platform integration — routes Discord messages to profile runtimes through the gateway.",
-  "version": "0.1.0",
-  "author": "Operator + Athena"
-}

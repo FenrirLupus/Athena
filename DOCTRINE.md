@@ -201,7 +201,11 @@ Two board rulings bind how this project is handled:
 ### Unchanged rails
 
 - The `x.x.x` versioning schema stays as the updater's key — alpha `0.0.x`,
-  beta `0.x.0`, stable `x.0.0`, single source `core/config.py` VERSION
-  (FEN-90); the working tree keeps read-first discipline.
+  beta `0.x.0`, stable `x.0.0` — and the channel is **derived from the digits**,
+  never stored beside them, so a release claiming a channel its version does not
+  support is refused by arithmetic. Single source: **`VERSION` at the tree root**,
+  read by `core/version.py` (amended 2026-11-04 — FEN-90 named `core/config.py`,
+  which does not exist in the new tree). `athena.sh version --channel <c>`
+  enforces the pairing. The working tree keeps read-first discipline.
 - `hermes-gateway-athena.service` (associate Athena's live gateway) is
   unaffected and stays up.
