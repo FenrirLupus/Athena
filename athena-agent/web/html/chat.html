@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<!--
+  html/chat.html — the CHAT page: Discord's rail + a ChatGPT thread.
+
+  Same eight layers as index.html; only the page layers differ, and every link carries "../" because
+  this document sits one directory down. The header still carries information only; the navbar still
+  carries pages only, so the one thing that navigates *within* the page lives in the page navbar (tabs).
+
+  Assets are reached through "../" rather than a router: a page is a document, and its depth is its own.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Chat · Athena</title>
+  <link rel="stylesheet" href="../css/global.css">
+  <link rel="stylesheet" href="../css/page.css">
+</head>
+<body data-page="chat" data-layout="app">
+
+  <!-- 1 · GLOBAL HEADER — information only -->
+  <header id="global-header" data-layer="1">
+    <div class="header-top">
+      <div class="brand">
+        <span class="brand-mark">Athena</span>
+        <span class="brand-tag">the hive</span>
+      </div>
+      <div class="badges" id="global-badges">
+        <span class="badge"><span class="badge-label">provider</span><span class="badge-value" data-fill="provider">—</span></span>
+        <span class="badge"><span class="badge-label">model</span><span class="badge-value" data-fill="model">—</span></span>
+        <span class="badge"><span class="badge-label">window</span><span class="badge-value" data-fill="window">—</span></span>
+        <span class="badge"><span class="badge-label">status</span><span class="badge-value" data-fill="status">—</span></span>
+      </div>
+    </div>
+  </header>
+
+  <!-- 2 · GLOBAL NAVBAR — pages only -->
+  <nav class="global-nav" aria-label="Main navigation">
+    <a class="logo" href="../index.html">Athena</a>
+    <div class="nav-links">
+      <a class="nav-link" href="../index.html" data-page="home">Home</a>
+      <a class="nav-link active" href="chat.html" data-page="chat">Chat</a>
+      <a class="nav-link" href="settings.html" data-page="settings">Settings</a>
+    </div>
+  </nav>
+
+  <!-- 3 · GLOBAL BODY -->
+  <main id="global-body" data-layer="3">
+    <div id="page-root" class="app">
+
+      <!-- 5 · PAGE HEADER — 6 · PAGE NAVBAR inside it -->
+      <header id="page-header" data-layer="5">
+        <div class="channel-head">
+          <span class="channel-hash">#</span>
+          <h1 id="channel-title">default</h1>
+          <span class="dot idle" id="channel-state">idle</span>
+        </div>
+        <nav class="page-nav" aria-label="Page navigation" role="tablist">
+          <button class="pill tab active" type="button" role="tab" data-tab="thread"
+                  aria-selected="true" aria-controls="panel-thread">Thread</button>
+          <button class="pill tab" type="button" role="tab" data-tab="resources"
+                  aria-selected="false" aria-controls="panel-resources">Resources</button>
+        </nav>
+        <!-- not a tab: a tablist whose children are not all tabs is announced wrongly, and Tab stopped here -->
+        <button class="pill" id="power" type="button" title="park or wake this channel">sleep</button>
+      </header>
+
+      <!-- 7 · PAGE BODY -->
+      <section id="page-body" data-layer="7">
+
+        <aside class="rail" aria-label="Agents">
+          <div class="rail-head">
+            <span>Agents</span>
+            <span class="muted small" id="channel-count">0</span>
+          </div>
+          <ul class="rail-list" id="channel-list">
+            <li class="rail-empty muted small">no agents yet</li>
+          </ul>
+          <form class="rail-new" id="channel-new">
+            <input class="channel-new-input" id="channel-new-name" type="text" placeholder="new agent"
+                   aria-label="new agent name" maxlength="32" autocomplete="off">
+            <button class="btn btn-quiet" type="submit" aria-label="create channel">+</button>
+          </form>
+          <p class="rail-foot muted small" id="tools-line">tools: —</p>
+        </aside>
+
+        <div class="panels">
+          <div class="panel active" id="panel-thread" role="tabpanel">
+            <div class="thread-legend">
+              <span>→ outbound · this agent</span>
+              <span>inbound · you &amp; peers ←</span>
+            </div>
+            <!-- The indicator belongs INSIDE the conversation: it scrolls with the messages and sits on
+                 its own side, so it is never mistaken for another channel's status. -->
+            <div class="thread-scroll" id="thread-scroll">
+            <ol class="thread" id="thread">
+              <li class="thread-empty muted">No messages yet. Say something below — the same turn the CLI runs.</li>
+            </ol>
+            <!-- Two indicators, one per side of the conversation:
+                   left  = outbound — this agent is thinking
+                   right = inbound  — this agent is waiting on a peer's answer -->
+            <div class="typing typing-outbound" id="typing" hidden aria-live="polite">
+              <span class="typing-label" id="typing-label"></span>
+              <span class="typing-suffix"></span>
+              <span class="typing-wave" data-wave aria-hidden="true">.  </span>
+              <span class="typing-queued muted small" id="typing-queued" hidden></span>
+            </div>
+            <div class="typing typing-inbound" id="typing-in" hidden aria-live="polite">
+              <span class="typing-label" id="typing-peer"></span>
+              <span class="typing-wave" data-wave aria-hidden="true">.. </span>
+            </div>
+            </div>
+            <div class="thread-note muted small" id="thread-note"></div>
+          </div>
+
+          <div class="panel" id="panel-resources" role="tabpanel">
+            <div class="resources" id="resources-cards">
+              <p class="muted">no channel selected</p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 8 · PAGE FOOTER — the composer -->
+      <footer id="page-footer" data-layer="8">
+        <form class="composer" id="composer">
+          <!-- attach: file picker on the left, chips above the field, uploaded to the channel's workspace -->
+          <button class="btn btn-attach" id="chat-attach" type="button" title="Attach a file"
+                  aria-label="attach a file">📎</button>
+          <input type="file" id="chat-file" multiple hidden>
+          <textarea class="composer-input" id="chat-text" rows="1"
+                    placeholder="Message the channel…  (Enter to send, Shift+Enter for a new line)"
+                    aria-label="message"></textarea>
+          <button class="btn btn-send" id="chat-send" type="submit">Send</button>
+        </form>
+        <ul class="attach-list" id="attach-list"></ul>
+        <div class="composer-meta muted small" id="chat-meta"></div>
+      </footer>
+    </div>
+  </main>
+
+  <!-- 4 · GLOBAL FOOTER — three columns: context use, version, endpoints -->
+  <footer id="global-footer" data-layer="4">
+    <div class="footer-inner">
+      <div class="footer-col">
+        <span class="footer-key">context</span>
+        <span class="footer-value" data-fill="ctx_summary">—</span>
+      </div>
+      <div class="footer-col">
+        <span class="footer-key">version</span>
+        <span class="footer-value" data-fill="version_line">Athena</span>
+      </div>
+      <div class="footer-col">
+        <span class="footer-key">api</span>
+        <span class="footer-links">
+          <a href="/health">/health</a>
+          <a href="/agents">/agents</a>
+          <a href="/config">/config</a>
+        </span>
+      </div>
+    </div>
+  </footer>
+
+  <template id="tpl-rail-item">
+    <li>
+      <button class="rail-item" type="button" data-channel="">
+        <span class="rail-dot" data-cell="state-dot" data-state="available" aria-hidden="true">●</span>
+        <span class="rail-name" data-cell="channel"></span>
+        <span class="rail-status" data-cell="status" data-state="available"></span>
+      </button>
+    </li>
+  </template>
+
+  <template id="tpl-message">
+    <li class="msg">
+      <div class="msg-avatar" data-cell="avatar" aria-hidden="true"></div>
+      <div class="msg-body">
+        <div class="msg-head">
+          <span class="msg-author" data-cell="author"></span>
+          <time class="msg-time" data-cell="time"></time>
+          <span class="msg-tag" data-cell="tag" hidden></span>
+        </div>
+        <div class="msg-text" data-cell="text"></div>
+      </div>
+    </li>
+  </template>
+
+  <template id="tpl-res-card">
+    <article class="res-card">
+      <h3 data-cell="channel"></h3>
+      <div class="res-stats">
+        <span><b data-cell="turns">0</b> turns</span>
+        <span><b data-cell="history_turns">0</b> in window</span>
+        <span><b data-cell="dropped_turns">0</b> dropped</span>
+        <span><b data-cell="session_messages">0</b> messages</span>
+      </div>
+      <div class="bars" data-bars></div>
+      <p class="muted small" data-cell="cost"></p>
+    </article>
+  </template>
+
+  <template id="tpl-bar">
+    <div class="bar-row">
+      <span class="bar-name" data-cell="name"></span>
+      <span class="bar-track"><span class="bar-fill" data-cell="fill"></span></span>
+      <span class="bar-val num" data-cell="value"></span>
+    </div>
+  </template>
+
+  <script src="../js/live.js"></script>
+  <script src="../js/app.js"></script>
+  <script src="../js/approvals.js"></script>
+</body>
+</html>

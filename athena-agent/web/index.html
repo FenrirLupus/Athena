@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<!--
+  index.html — the PARENT of the site, and the HOME page.
+
+  The header is INFORMATION ONLY (brand + provider/model/window/status); the navbar is PAGES ONLY
+  (Home · Chat · Settings). Keeping them apart is what stops the header becoming a dumping ground:
+  anything that navigates goes in the nav, anything that describes the running system goes in the header.
+
+  Division of labour:
+    HTML  structure — every layer and block is written here; lists clone <template> elements
+    CSS   visuals   — css/global.css frames the site, css/page.css styles this page
+    JS    function  — js/live.js fetches and fills, js/app.js boots; neither builds layout
+
+  Layer map (documentation/website/Website-Architecture.md):
+    1 global-header  2 global-navbar  3 global-body  4 global-footer
+    5 page-header (6 page-navbar inside)  7 page-body  8 page-footer
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Home · Athena</title>
+  <link rel="stylesheet" href="css/global.css">
+  <link rel="stylesheet" href="css/page.css">
+</head>
+<body data-page="home">
+
+  <!-- 1 · GLOBAL HEADER — information only -->
+  <header id="global-header" data-layer="1">
+    <div class="header-top">
+      <div class="brand">
+        <span class="brand-mark">Athena</span>
+        <span class="brand-tag">the hive</span>
+      </div>
+      <div class="badges" id="global-badges">
+        <span class="badge"><span class="badge-label">provider</span><span class="badge-value" data-fill="provider">—</span></span>
+        <span class="badge"><span class="badge-label">model</span><span class="badge-value" data-fill="model">—</span></span>
+        <span class="badge"><span class="badge-label">window</span><span class="badge-value" data-fill="window">—</span></span>
+        <span class="badge"><span class="badge-label">status</span><span class="badge-value" data-fill="status">—</span></span>
+      </div>
+    </div>
+  </header>
+
+  <!-- 2 · GLOBAL NAVBAR — pages only -->
+  <nav class="global-nav" aria-label="Main navigation">
+    <a class="logo" href="index.html">Athena</a>
+    <div class="nav-links">
+      <a class="nav-link active" href="index.html" data-page="home">Home</a>
+      <a class="nav-link" href="html/chat.html" data-page="chat">Chat</a>
+      <a class="nav-link" href="html/settings.html" data-page="settings">Settings</a>
+    </div>
+  </nav>
+
+  <!-- 3 · GLOBAL BODY -->
+  <main id="global-body" data-layer="3">
+    <div id="page-root">
+
+      <!-- 5 · PAGE HEADER — 6 · PAGE NAVBAR inside it -->
+      <header id="page-header" data-layer="5">
+        <div class="page-heading">
+          <h1>Hive overview</h1>
+          <p class="page-subtitle">
+            Every agent is resident and visible: what it is doing, what it has spent, and what it remembers.
+          </p>
+        </div>
+        <nav class="page-nav" aria-label="Page navigation">
+          <a class="pill" href="#agents">Agents</a>
+          <a class="pill" href="#resources">Resources</a>
+          <a class="pill" href="#model">Model</a>
+        </nav>
+      </header>
+
+      <!-- 7 · PAGE BODY -->
+      <section id="page-body" data-layer="7">
+
+        <section class="block" id="agents">
+          <div class="block-head">
+            <h2>Agents</h2>
+            <p class="block-note">one resident agent per channel — its own session, queue and memory</p>
+          </div>
+          <div class="block-content">
+            <table class="grid">
+              <thead>
+                <tr>
+                  <th>channel</th><th>turns</th><th>queue</th><th>state</th>
+                  <th>messages</th><th>last status</th><th>last s</th><th>open</th>
+                </tr>
+              </thead>
+              <tbody id="channels-body">
+                <tr><td colspan="8" class="muted">No agents yet. Open Chat to start one.</td></tr>
+              </tbody>
+            </table>
+            <p class="muted small" id="tools-line">tools: —</p>
+          </div>
+        </section>
+
+        <section class="block" id="resources">
+          <div class="block-head">
+            <h2>Resources</h2>
+            <p class="block-note">what each agent is spending: window share, turns kept, memory rows, compressions</p>
+          </div>
+          <div class="block-content">
+            <div class="resources" id="resources-cards">
+              <p class="muted">no channel has been used yet</p>
+            </div>
+          </div>
+        </section>
+
+        <section class="block" id="model">
+          <div class="block-head">
+            <h2>Model</h2>
+            <p class="block-note">where answers come from; a local model is a base URL like any other</p>
+          </div>
+          <div class="block-content">
+            <dl class="kv" id="model-kv">
+              <dt>provider</dt><dd data-fill="provider">—</dd>
+              <dt>model</dt><dd data-fill="model">—</dd>
+              <dt>window</dt><dd data-fill="window">—</dd>
+              <dt>version</dt><dd data-fill="version">—</dd>
+              <dt>warnings</dt><dd data-fill="warnings">—</dd>
+            </dl>
+          </div>
+        </section>
+
+      </section>
+
+      <!-- 8 · PAGE FOOTER -->
+      <footer id="page-footer" data-layer="8">
+        <span class="footer-text">live data from /health and /agents, refreshed every 5 s</span>
+      </footer>
+    </div>
+  </main>
+
+  <!-- 4 · GLOBAL FOOTER — three columns: context use, version, endpoints -->
+  <footer id="global-footer" data-layer="4">
+    <div class="footer-inner">
+      <div class="footer-col">
+        <span class="footer-key">context</span>
+        <span class="footer-value" data-fill="ctx_summary">—</span>
+      </div>
+      <div class="footer-col">
+        <span class="footer-key">version</span>
+        <span class="footer-value" data-fill="version_line">Athena</span>
+      </div>
+      <div class="footer-col">
+        <span class="footer-key">api</span>
+        <span class="footer-links">
+          <a href="/health">/health</a>
+          <a href="/agents">/agents</a>
+          <a href="/config">/config</a>
+        </span>
+      </div>
+    </div>
+  </footer>
+
+  <!-- repeated structure lives in HTML; the script only fills it -->
+  <template id="tpl-channel-row">
+    <tr>
+      <td class="strong" data-cell="channel"></td>
+      <td class="num" data-cell="turns"></td>
+      <td class="num" data-cell="queue"></td>
+      <td><span class="dot" data-cell="state"></span></td>
+      <td class="num" data-cell="messages"></td>
+      <td data-cell="last_status"></td>
+      <td class="num" data-cell="last_seconds"></td>
+      <td><a class="row-link" data-cell="open" href="html/chat.html">chat →</a></td>
+    </tr>
+  </template>
+
+  <template id="tpl-res-card">
+    <article class="res-card">
+      <h3 data-cell="channel"></h3>
+      <div class="res-stats">
+        <span><b data-cell="turns">0</b> turns</span>
+        <span><b data-cell="history_turns">0</b> in window</span>
+        <span><b data-cell="dropped_turns">0</b> dropped</span>
+        <span><b data-cell="session_messages">0</b> messages</span>
+      </div>
+      <div class="bars" data-bars></div>
+      <p class="muted small" data-cell="cost"></p>
+    </article>
+  </template>
+
+  <template id="tpl-bar">
+    <div class="bar-row">
+      <span class="bar-name" data-cell="name"></span>
+      <span class="bar-track"><span class="bar-fill" data-cell="fill"></span></span>
+      <span class="bar-val num" data-cell="value"></span>
+    </div>
+  </template>
+
+  <script src="js/live.js"></script>
+  <script src="js/app.js"></script>
+  <script src="js/approvals.js"></script>
+</body>
+</html>

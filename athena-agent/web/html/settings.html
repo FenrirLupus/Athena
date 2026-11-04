@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<!--
+  html/settings.html — the SETTINGS page: what is in force, read-only.
+
+  The config file is the interface (documentation/architecture/08-config.md): it is commented, diffable
+  and editable in the operator's own editor. A web form here would be a second place to change the same
+  value, and the two would drift. So this page *shows* the merged defaults + overrides, the paths, and
+  the models on disk — and says where to change them.
+
+  Header = information. Navbar = pages. Page navbar = sections of this page.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Settings · Athena</title>
+  <link rel="stylesheet" href="../css/global.css">
+  <link rel="stylesheet" href="../css/page.css">
+</head>
+<body data-page="settings">
+
+  <!-- 1 · GLOBAL HEADER — information only -->
+  <header id="global-header" data-layer="1">
+    <div class="header-top">
+      <div class="brand">
+        <span class="brand-mark">Athena</span>
+        <span class="brand-tag">the hive</span>
+      </div>
+      <div class="badges" id="global-badges">
+        <span class="badge"><span class="badge-label">provider</span><span class="badge-value" data-fill="provider">—</span></span>
+        <span class="badge"><span class="badge-label">model</span><span class="badge-value" data-fill="model">—</span></span>
+        <span class="badge"><span class="badge-label">window</span><span class="badge-value" data-fill="window">—</span></span>
+        <span class="badge"><span class="badge-label">status</span><span class="badge-value" data-fill="status">—</span></span>
+      </div>
+    </div>
+  </header>
+
+  <!-- 2 · GLOBAL NAVBAR — pages only -->
+  <nav class="global-nav" aria-label="Main navigation">
+    <a class="logo" href="../index.html">Athena</a>
+    <div class="nav-links">
+      <a class="nav-link" href="../index.html" data-page="home">Home</a>
+      <a class="nav-link" href="chat.html" data-page="chat">Chat</a>
+      <a class="nav-link active" href="settings.html" data-page="settings">Settings</a>
+    </div>
+  </nav>
+
+  <!-- 3 · GLOBAL BODY -->
+  <main id="global-body" data-layer="3">
+    <div id="page-root">
+
+      <!-- 5 · PAGE HEADER — 6 · PAGE NAVBAR inside it -->
+      <header id="page-header" data-layer="5">
+        <div class="page-heading">
+          <h1>Settings</h1>
+          <p class="page-subtitle">
+            What is in force right now — defaults merged with your overrides. Values are changed in
+            <code>~/.athena/config.yaml</code>, which is the interface; this page is a reading of it.
+          </p>
+        </div>
+        <nav class="page-nav" aria-label="Page navigation">
+          <a class="pill" href="#agents">Agents</a>
+          <a class="pill" href="#model">Model</a>
+          <a class="pill" href="#local">Local model</a>
+          <a class="pill" href="#budget">Budget</a>
+          <a class="pill" href="#paths">Paths</a>
+          <a class="pill" href="#models">Models on disk</a>
+        </nav>
+      </header>
+
+      <!-- 7 · PAGE BODY -->
+      <section id="page-body" data-layer="7">
+
+        <section class="block" id="agents">
+          <div class="block-head">
+            <h2>Agents</h2>
+            <p class="block-note">each profile can name its own persona, provider, key and model</p>
+          </div>
+          <div class="block-content">
+            <p class="agents-actions">
+              <a class="btn btn-send" href="new-agent.html">Create an agent →</a>
+            </p>
+            <table class="grid">
+              <thead>
+                <tr><th>agent</th><th>persona</th><th>provider</th><th>model</th><th>open</th></tr>
+              </thead>
+              <tbody id="cfg-agents">
+                <tr><td colspan="5" class="muted">loading…</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="block" id="model">
+          <div class="block-head">
+            <h2>Model</h2>
+            <p class="block-note">the wire format, the endpoint, and the window the prompt stack is sized against</p>
+          </div>
+          <div class="block-content">
+            <dl class="kv" id="cfg-model">
+              <dt>provider</dt><dd data-cfg="model.provider">—</dd>
+              <dt>name</dt><dd data-cfg="model.name">—</dd>
+              <dt>base_url</dt><dd data-cfg="model.base_url">—</dd>
+              <dt>window</dt><dd data-cfg="model.window">—</dd>
+              <dt>max output</dt><dd data-cfg="model.max_output_tokens">—</dd>
+              <dt>temperature</dt><dd data-cfg="model.temperature">—</dd>
+            </dl>
+          </div>
+        </section>
+
+        <section class="block" id="local">
+          <div class="block-head">
+            <h2>Local model</h2>
+            <p class="block-note">served from ~/.athena/models and spoken to over the openai format</p>
+          </div>
+          <div class="block-content">
+            <dl class="kv" id="cfg-local">
+              <dt>enabled</dt><dd data-cfg="model.local.enabled">—</dd>
+              <dt>backend</dt><dd data-cfg="model.local.backend">—</dd>
+              <dt>name</dt><dd data-cfg="model.local.name">—</dd>
+              <dt>port</dt><dd data-cfg="model.local.port">—</dd>
+              <dt>ctx</dt><dd data-cfg="model.local.ctx">—</dd>
+              <dt>python</dt><dd data-cfg="model.local.python">—</dd>
+              <dt>gpu util</dt><dd data-cfg="model.local.gpu_memory_utilization">—</dd>
+            </dl>
+          </div>
+        </section>
+
+        <section class="block" id="budget">
+          <div class="block-head">
+            <h2>Budget</h2>
+            <p class="block-note">shares of the window; they must sum to 100% or less, with output counted</p>
+          </div>
+          <div class="block-content">
+            <dl class="kv" id="cfg-budget">
+              <dt>system</dt><dd data-cfg="budget.system_pct">—</dd>
+              <dt>assistant</dt><dd data-cfg="budget.assistant_pct">—</dd>
+              <dt>user</dt><dd data-cfg="budget.user_pct">—</dd>
+              <dt>summary</dt><dd data-cfg="budget.summary_pct">—</dd>
+              <dt>history</dt><dd data-cfg="budget.history_pct">—</dd>
+              <dt>memory</dt><dd data-cfg="budget.memory_pct">—</dd>
+              <dt>output</dt><dd data-cfg="budget.output_pct">—</dd>
+              <dt>max iterations</dt><dd data-cfg="budget.max_iterations">—</dd>
+              <dt>max turn usd</dt><dd data-cfg="budget.max_turn_usd">—</dd>
+            </dl>
+          </div>
+        </section>
+
+        <section class="block" id="paths">
+          <div class="block-head">
+            <h2>Paths</h2>
+            <p class="block-note">where the profile, sessions and models live</p>
+          </div>
+          <div class="block-content">
+            <dl class="kv" id="cfg-paths">
+              <dt>root</dt><dd data-cfg="paths.root">—</dd>
+              <dt>profiles</dt><dd data-cfg="paths.agents">—</dd>
+              <dt>models</dt><dd data-cfg="models_dir">—</dd>
+            </dl>
+          </div>
+        </section>
+
+        <section class="block" id="models">
+          <div class="block-head">
+            <h2>Models on disk</h2>
+            <p class="block-note">downloaded with <code>athena.sh models download</code>; each carries a MODEL.md manifest</p>
+          </div>
+          <div class="block-content">
+            <table class="grid">
+              <thead>
+                <tr><th>name</th><th>format</th><th>quant</th><th>size</th><th>repo</th></tr>
+              </thead>
+              <tbody id="models-body">
+                <tr><td colspan="5" class="muted">no models downloaded</td></tr>
+              </tbody>
+            </table>
+            <p class="muted small" id="warnings-line"></p>
+          </div>
+        </section>
+
+      </section>
+
+      <!-- 8 · PAGE FOOTER -->
+      <footer id="page-footer" data-layer="8">
+        <span class="footer-text">read-only view of GET /config — edit ~/.athena/config.yaml to change anything</span>
+      </footer>
+    </div>
+  </main>
+
+  <!-- 4 · GLOBAL FOOTER — three columns: context use, version, endpoints -->
+  <footer id="global-footer" data-layer="4">
+    <div class="footer-inner">
+      <div class="footer-col">
+        <span class="footer-key">context</span>
+        <span class="footer-value" data-fill="ctx_summary">—</span>
+      </div>
+      <div class="footer-col">
+        <span class="footer-key">version</span>
+        <span class="footer-value" data-fill="version_line">Athena</span>
+      </div>
+      <div class="footer-col">
+        <span class="footer-key">api</span>
+        <span class="footer-links">
+          <a href="/health">/health</a>
+          <a href="/agents">/agents</a>
+          <a href="/config">/config</a>
+        </span>
+      </div>
+    </div>
+  </footer>
+
+  <template id="tpl-model-row">
+    <tr>
+      <td class="strong" data-cell="name"></td>
+      <td data-cell="format"></td>
+      <td data-cell="quant"></td>
+      <td class="num" data-cell="size"></td>
+      <td class="muted" data-cell="repo"></td>
+    </tr>
+  </template>
+
+  <script src="../js/live.js"></script>
+  <script src="../js/app.js"></script>
+  <script src="../js/approvals.js"></script>
+</body>
+</html>

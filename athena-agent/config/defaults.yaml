@@ -1,0 +1,236 @@
+# Athena configuration — every value is documented, every default is here.
+# Edit in place; a deleted line falls back to the default for that key.
+
+model:
+  # Wire format of the endpoint: openai (also llama.cpp, Ollama, vLLM, LM Studio, DeepSeek), anthropic, or mock.
+  provider: mock
+
+  # The model identifier the provider expects, exactly as its catalogue spells it.
+  name: mock-1
+
+  # Base URL of the endpoint; ignored by mock and by local. A custom URL is just a different value here.
+  base_url: "https://api.deepseek.com/v1"
+
+  # The provider's context window in tokens; the whole prompt stack is sized as a share of this.
+  window: 32768
+
+  # Hard ceiling on one reply, in tokens; the effective cap is the smaller of this and output_pct.
+  max_output_tokens: 4096
+
+  # Sampling temperature; 0 would be deterministic.
+  temperature: 0.7
+
+  # Run a model downloaded into .athena/models instead of calling an endpoint.
+  # A local model is served, then spoken to over the openai format — same adapter, same turn loop.
+  local:
+    # Turn local serving on; when true, provider/base_url above are ignored.
+    enabled: false
+
+    # Which server to start: transformers (tiered GPU/CPU/disk), vllm, llamacpp (a GGUF), or command.
+    backend: transformers
+
+    # Downloaded model to serve: the folder name under .athena/models (see `athena models list`).
+    name: ""
+
+    # Hugging Face repo to resolve instead of a folder name, e.g. Qwen/Qwen2.5-3B-Instruct-GGUF.
+    repo: ""
+
+    # Port the server listens on.
+    port: 8080
+
+    # Context size handed to the server; keep it equal to model.window or the stack over-fills the window.
+    ctx: 32768
+
+    # llama.cpp server binary, by name from PATH or an absolute path.
+    binary: llama-server
+
+    # Python that has vLLM installed; the heavy stack lives outside Athena's venv on purpose.
+    python: ""
+
+    # Weight quantization for the vllm backend: bitsandbytes for a model that will not fit as bf16.
+    quantization: ""
+
+    # Fraction of free VRAM the plan may use; lower it to leave room for the desktop.
+    gpu_memory_utilization: 0.90
+
+    # Fraction of available RAM the plan may use for the second tier.
+    ram_fill: 0.75
+
+    # Command template used when backend is command; {model}, {port} and {ctx} are substituted.
+    command: ""
+
+    # Seconds to wait for the server to answer before the turn fails with the log path.
+    startup_timeout_s: 180
+
+budget:
+  # Share of the window given to the turns kept verbatim before compression would fire.
+  history_pct: 30.0
+
+  # Share given to the digest that replaces dropped turns; must stay below history.
+  summary_pct: 20.0
+
+  # Share given to the system instructions block.
+  system_pct: 5.0
+
+  # Share given to the agent's own identity file (ASSISTANT.md).
+  assistant_pct: 7.5
+
+  # Share given to the person's identity file (USER.md).
+  user_pct: 7.5
+
+  # Share given to the memory index; 0.0.1 renders nothing here yet.
+  memory_pct: 10.0
+
+  # Share of the window reserved for the reply; the reply cap is min(this, model.max_output_tokens).
+  output_pct: 10.0
+
+  # Model calls one turn may make before it must answer with what it has.
+  max_iterations: 100
+
+  # Dollar ceiling for a single turn; the mock provider reports 0.0 per call.
+  max_turn_usd: 0.50
+
+  # A turn that hits its ceiling still gets this many extra calls to produce a clean answer.
+  grace_calls: 1
+
+tools:
+  # Offer tools to the agent at all; a conversation-only agent should be false so it cannot choose one.
+  enabled: true
+
+  # Cap on a single tool result in bytes; oversized results are truncated with a marker.
+  max_result_bytes: 8000
+
+  # Largest file the composer will accept as an attachment, in bytes.
+  max_upload_bytes: 20971520
+
+  # The shell tool. `require_containment: true` refuses to run at all when bubblewrap is missing — a shell that
+  # silently loses its sandbox is worse than no shell.
+  terminal:
+    require_containment: true
+
+    # Allow the contained shell to reach the network.
+    network: true
+
+    # Seconds before a command is killed.
+    timeout_s: 120
+
+  # The computer tool: pointer, keyboard, screenshots, headless browser. Off until deliberately enabled, because
+  # moving the real pointer moves the user's pointer.
+  computer:
+    enabled: false
+
+    # Seconds before a capture or input call gives up.
+    timeout_s: 30
+
+  # Tool packs to load from .athena/tools/<name>/TOOL.md (and profiles/<lane>/tools/).
+  # A folder is not permission; a name on this list is.
+  packs: []
+
+  # How long an approval prompt waits for the user before the action is treated as denied.
+  approval_timeout_s: 300
+
+  # Per-tool wall-clock limit in seconds.
+  timeout_s: 60
+
+server:
+  # Interface the multiplexer binds to; 127.0.0.1 keeps it off the network by default.
+  host: "127.0.0.1"
+
+  # Port for the HTTP surface.
+  port: 8765
+
+agents:
+  # Where per-agent channels live; each channel gets sessions/ and identity files under here.
+  dir: "profiles"
+
+  # How long a request waits for its turn to finish before returning "queued".
+  turn_wait_s: 120
+
+  # How many tasks may wait for one agent; beyond this a request is refused instead of queueing forever.
+  max_queue: 32
+
+  # Minutes of inactivity after which a channel parks itself; 0 disables idle sleep entirely.
+  idle_sleep_minutes: 15
+
+  # How often the idle sweep runs, in seconds. It only parks; waking is always an explicit request.
+  sweep_seconds: 30
+
+metrics:
+  # Whether every turn writes a record to the metrics log (metrics/turns.jsonl beside the profiles).
+  enabled: true
+
+  # Notional price of one million tokens in USD, used to cost both remote and local turns.
+  usd_per_mtok: 1.0
+
+  # Sample GPU memory, utilisation and the model process RSS at the end of each local turn.
+  sample_resources: true
+
+compression:
+  # Context fill at which compression becomes due, as a percentage of the whole window.
+  # Soft: compress when there are turns to evict. Hard: compress regardless, because the window is nearly full.
+  threshold_soft_pct: 80.0
+
+  # Context fill at which compression must happen even if little history has accumulated.
+  threshold_hard_pct: 90.0
+
+  # SUMMARY.md must be at least this share of the context window: the agent's memory of evicted turns.
+  target_min_pct: 20.0
+
+  # …and may grow to this share. Anywhere between min and max is acceptable; the stack allocates the max.
+  target_max_pct: 30.0
+
+  # Share of the history block kept verbatim after a compression, as a percentage of its share.
+  keep_after_compress_pct: 50
+
+  # Who writes SUMMARY.md: auto (the turn's model, mechanical on failure) or mechanical.
+  digest: auto
+
+  # Ceiling for the digest call in tokens; 0 means target_min_pct of the window (the floor, not a guess).
+  digest_max_tokens: 0
+
+plugins:
+  # Plugins to load. A folder in .athena/plugins/ is not permission — a name on this list is.
+  # Each plugin.py exposes register(registry, ctx) and runs in-process, so enabling one is a decision.
+  enabled: []
+
+security:
+  # Run the two watchdogs (red = tampering from inside, blue = from outside) in the background.
+  enabled: true
+
+  # Seconds between sweeps. A sweep hashes the critical set, so this is the cost knob.
+  interval_s: 300
+
+  # Where the baseline, the event ledger and REPORT.md live, under the athena root.
+  folder: security
+
+  # Let the *user* approve system-package installs into the container. Off by default: a package is shared by every
+  # plugin and the server, so it is not something a single artefact can ask for and get.
+  allow_box_installs: false
+
+  credentials:
+    # sidecar: keys are read by a separate process (core/credproxy.py) and never enter the server's memory.
+    # direct:  the server signs provider requests itself, as it did before.
+    mode: sidecar
+
+  network:
+    # Refuse anything off the loopback for local-only paths, even if the server is later bound to 0.0.0.0.
+    loopback_only: true
+
+    # Requests per minute per client before a 429 and a blue-team event.
+    rate_per_minute: 240
+
+    # Require the API token on every request except the static shell. The shell hands the browser a cookie, so the
+    # UI keeps working; curl and other local apps stop working without the token.
+    require_token: true
+
+    # Override the token. Empty means: generate one into `security/api_token` (mode 0600) on first boot.
+    api_token: ""
+
+    # Audit the process's own established sockets against this allowlist; unexpected ones are red-team findings.
+    audit_outbound: true
+
+    # Hostnames the architecture is expected to reach. Loopback is always allowed.
+    allow:
+      - api.deepseek.com
+      - huggingface.co
+      - cdn-lfs.huggingface.co
