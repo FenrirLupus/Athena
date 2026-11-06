@@ -50,10 +50,9 @@ Measured against `alpha-0.0.2`: 26 files added, 104 modified, 3 removed, +4223 /
 
 ## 0.0.2 — alpha (in progress, not released)
 
-Comparison base: `0.0.1`, which is what the `latest` branch carries. Measured, not recalled — diffing the working tree
-against `git archive origin/latest` gives **4 modified files, 0 added, 0 removed** outside runtime state. The command
-that produces that list is in `documentation/architecture/39-branches-and-channels.md`; if it disagrees with this
-section, this section is wrong.
+Comparison base: `0.0.1`, which is what the `latest` branch carries. Measured, not recalled —
+`git diff --shortstat origin/latest..origin/alpha-0.0.2` gives **50 files changed, 5393 insertions, 306 deletions**
+(22 added, 28 modified, 0 removed). If that command disagrees with this section, this section is wrong.
 
 `+` `server/ledger_view.py` + `tests/ledger_view_check.py` (14 checks) — one ordered reader over the ledger: oldest
 first, cursor that never repeats, corrupt rows skipped **and counted**, and a two-source timeline in which turn rows
