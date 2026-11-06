@@ -33,10 +33,11 @@ Measured against `alpha-0.0.2`: 26 files added, 104 modified, 3 removed, +4223 /
 `+` gates: `web_assets_check` (scripts parse, script targets exist, no orphan keyword), `timefmt_check`,
   `pages_build_check`
 `-` dead code: `models/gguf_meta.py`, `wireTabs`, `settingsSpec`, `wizardSpec`, `playBuffer`, `tpl-model-option`,
-  ten single-reference helpers, five clientless routes (`/diagnostics`, `/user/avatars`, `/call/stop`,
-  `/metrics/turns`, `/agents/{channel}/ask/{target}`), and the CSS families their producers used
+  ten single-reference helpers, four clientless routes (`/user/avatars`, `/call/stop`, `/metrics/turns`,
+  `/agents/{channel}/ask/{target}`), and the CSS families their producers used; `/diagnostics` was kept because
+  it is the only doorway to the outcome levels
 `-` three live scripts that could not run against the token-gated API (`state_walk`, `interrupt_walk`,
-  `interrupt_midturn`); their coverage is in the gated suites
+  `interrupt_midturn`); interrupt coverage lives in `tests/selftest.py`, which is not part of the gate
 `#` HTTP 402 now reports `error_balance` with an actionable message instead of `error_api`
 `#` documentation corrected where it had drifted: version, authentication, the live approval endpoint, and a
   capability table that listed shipped tools as absent

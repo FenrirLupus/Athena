@@ -43,6 +43,8 @@ import re
 import sys
 import time
 from pathlib import Path
+
+import _boot  # noqa: F401 — puts the project root on sys.path before core is imported
 from core import timefmt
 
 ROOT = Path(__file__).resolve().parents[1]

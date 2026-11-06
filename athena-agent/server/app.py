@@ -1088,6 +1088,20 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     # -- permissions: the one queue ----------------------------------------
+    @app.get("/diagnostics")
+    def diagnostics(limit: int = 200) -> dict:
+        """Turn outcomes folded into the three levels: what finished slowly, what is stuck, what failed."""
+        from core import metrics as metrics_mod
+        from core import outcomes as outcomes_mod
+
+        base = Path(__file__).resolve().parents[2]
+        rows = metrics_mod.read(base, limit=limit) or []
+        try:
+            slow = float((cfg.get("metrics") or {}).get("slow_turn_s") or 60.0)
+        except (TypeError, ValueError):
+            slow = 60.0
+        return outcomes_mod.diagnostics(rows, slow_s=slow)
+
     @app.get("/permissions")
     def permissions_pending() -> dict:
         """Everything waiting on a person: path asks, install requests, and anything else that registers."""

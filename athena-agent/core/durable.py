@@ -8,6 +8,7 @@ secret file to 0644 and truncating a short write, so each contract gets its own 
 from __future__ import annotations
 
 import os
+import stat
 import tempfile
 from pathlib import Path
 
@@ -67,6 +68,11 @@ def write_state(path, payload: bytes | str, *, mode: int = 0o644) -> Path:
     """
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
+    if target.exists():                       # keep the mode the file already had; a rewrite is not a re-permission
+        try:
+            mode = stat.S_IMODE(target.stat().st_mode)
+        except OSError:
+            pass
     data = payload.encode("utf-8") if isinstance(payload, str) else payload
     fd, tmp = tempfile.mkstemp(dir=str(target.parent), prefix="." + target.name + ".", suffix=".tmp")
     try:
