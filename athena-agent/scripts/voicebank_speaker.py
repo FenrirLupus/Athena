@@ -17,9 +17,21 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
+TREE = Path(__file__).resolve().parents[1]
+if str(TREE) not in sys.path:                       # `python scripts/voicebank_speaker.py` puts scripts/ on the path
+    sys.path.insert(0, str(TREE))
+from core import trace
+
+LANE = "voicebank"
+
+
+def _say(payload: dict) -> None:
+    """One JSON object per line on stdout: this script's output, read by whoever built the bank. Not a diagnostic."""
+    print(json.dumps(payload, ensure_ascii=False), flush=True)
 
 
 def main() -> int:
@@ -43,7 +55,8 @@ def main() -> int:
     audio_dir = bank / "dataset" / "audio"
     meta_path = bank / "dataset" / "metadata.jsonl"
     if not audio_dir.is_dir():
-        print(json.dumps({"ok": False, "error": f"no dataset/audio in {bank}"}))
+        trace.event("voicebank.refused", level="error", channel=LANE, reason="no dataset/audio", bank=str(bank))
+        _say({"ok": False, "error": f"no dataset/audio in {bank}"})
         return 2
 
     transcripts = {}
@@ -58,17 +71,22 @@ def main() -> int:
     if args.limit:
         clips = clips[: args.limit]
     if not clips:
-        print(json.dumps({"ok": False, "error": "no clips"}))
+        trace.event("voicebank.refused", level="error", channel=LANE, reason="no clips", bank=str(bank))
+        _say({"ok": False, "error": "no clips"})
         return 2
 
-    print(json.dumps({"loading": args.model}), flush=True)
-    model = CosyVoice3(args.model, load_trt=False, load_vllm=False, fp16=False)
+    _say({"loading": args.model})
+    with trace.span("voicebank.speaker.load", channel=LANE, model=Path(args.model).name, speaker=args.speaker) as sp:
+        started = time.time()
+        model = CosyVoice3(args.model, load_trt=False, load_vllm=False, fp16=False)
+        sp.ok(seconds=round(time.time() - started, 2))
     frontend = model.frontend
 
-    import subprocess as sp
+    import subprocess as sp_run
     import tempfile
 
     registered = []
+    skipped = []
     work = tempfile.mkdtemp(prefix="voicebank-")
     for index, clip in enumerate(clips, start=1):
         text = transcripts.get(clip.name) or (bank / "reference.txt").read_text(encoding="utf-8").strip()
@@ -76,18 +94,28 @@ def main() -> int:
         # the speech tokeniser refuses anything over 30 s, so each clip is cut to its first 30 s
         cut = Path(work) / f"clip-{index:02d}.wav"
         try:
-            sp.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(clip),
-                    "-t", "30", "-ar", "16000", "-ac", "1", str(cut)], check=True, timeout=120)
-        except Exception:
+            sp_run.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(clip),
+                        "-t", "30", "-ar", "16000", "-ac", "1", str(cut)], check=True, timeout=120)
+        except Exception as exc:                                  # noqa: BLE001
+            # not fatal: the original clip is tried instead, which is a real fallback worth one line
+            trace.event("voicebank.speaker.cut.failed", level="debug", channel=LANE, clip=clip.name,
+                        fallback="original clip", error=f"{type(exc).__name__}: {exc}"[:160])
             cut = clip
         try:
             model.add_zero_shot_spk(text, str(cut), temp_id)
             registered.append(temp_id)
+            trace.event("voicebank.speaker.clip", level="debug", channel=LANE, index=index, of=len(clips),
+                        clip=clip.name, chars=len(text))
         except Exception as exc:                                  # noqa: BLE001
-            print(json.dumps({"clip": clip.name, "skipped": f"{type(exc).__name__}: {exc}"}), flush=True)
+            skipped.append(clip.name)
+            trace.event("voicebank.speaker.skipped", level="info", channel=LANE, index=index, clip=clip.name,
+                        error=f"{type(exc).__name__}: {exc}"[:160])
+            _say({"clip": clip.name, "skipped": f"{type(exc).__name__}: {exc}"})
 
     if not registered:
-        print(json.dumps({"ok": False, "error": "no clip could be registered"}))
+        trace.event("voicebank.refused", level="error", channel=LANE, reason="no clip could be registered",
+                    clips=len(clips), skipped=len(skipped))
+        _say({"ok": False, "error": "no clip could be registered"})
         return 3
 
     info = frontend.spk2info
@@ -115,7 +143,10 @@ def main() -> int:
               "speaker": args.speaker, "spk2info": str(Path(args.model) / "spk2info.pt"),
               "available": model.list_available_spks()}
     (bank / "speaker_bank.json").write_text(json.dumps(counts, indent=2) + "\n", encoding="utf-8")
-    print(json.dumps({"ok": True, **counts}, ensure_ascii=False))
+    trace.event("voicebank.speaker.done", channel=LANE, speaker=args.speaker, clips=len(clips),
+                registered=len(registered), skipped=len(skipped), averaged_tensors=len(averaged),
+                available=len(counts["available"]), spk2info=counts["spk2info"])
+    _say({"ok": True, **counts})
     return 0
 
 

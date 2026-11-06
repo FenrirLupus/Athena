@@ -15,13 +15,13 @@ the same checks in the same order, but a failure now names itself.
 """
 from __future__ import annotations
 
-import sys
 import time
 from pathlib import Path
 from typing import Protocol
 
 from core import agentconfig
 from core import channelstate
+from core import trace
 from core.context_window import effective_window
 
 
@@ -162,7 +162,7 @@ class ChannelLifecycle:
             failed = {k: v["detail"] for k, v in (result.get("checks") or {}).items() if not v["ok"]}
             detail = "; ".join(f"{k}: {v}" for k, v in failed.items()) or "unknown"
             raise ChannelAsleep(f"{channel.name} could not be woken to take this task — {detail}")
-        print(f"wake-on-delivery: {channel.name} woken by an incoming message", file=sys.stderr)
+        trace.event("lifecycle.wake", channel=channel.name, why="incoming message")
 
     # -- the idle sweep ----------------------------------------------------
     def sweep_idle(self, now: float | None = None) -> list[str]:
@@ -188,7 +188,8 @@ class ChannelLifecycle:
             except ValueError:
                 continue
             slept.append(channel.name)
-            print(f"idle-sleep: {channel.name} parked after {_span(idle_for)} idle", file=sys.stderr)
+            trace.event("lifecycle.sleep", channel=channel.name, idle_s=_span(idle_for),
+                        reason="idle sweep")
         return slept
 
     @staticmethod

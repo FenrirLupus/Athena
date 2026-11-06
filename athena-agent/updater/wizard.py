@@ -29,12 +29,19 @@ from pathlib import Path
 from . import apply as apply_mod
 from . import channels, source as source_mod
 from core.jsonio import read_json
+from core import trace
 
 REPO_DEFAULT = "FenrirLupus/Athena"
+LANE = "updater"
 
 
 class WizardError(RuntimeError):
     """A refusal stated before anything was changed."""
+
+
+def _refuse(reason: str, **fields) -> None:
+    """A refusal is a decision, not an exception: one event carrying the reason, then the caller raises."""
+    trace.event("updater.refused", level="info", channel=LANE, reason=reason, **fields)
 
 
 # -- small terminal helpers ----------------------------------------------------------------------------------------
@@ -74,6 +81,7 @@ def run(*, athena_root: Path, channel: str = "", source_spec: str = "", branch: 
     athena_root = Path(athena_root).expanduser().resolve()
     live = athena_root / "athena-agent"
     if not (live / "VERSION").is_file():
+        _refuse("not an Athena tree (no VERSION)", tree=str(live))
         raise WizardError(f"{live} does not look like an Athena tree (no VERSION) — run this from an install")
     installed = channels.read_version(live)
     installed_channel = channels.channel_of(installed)
@@ -81,14 +89,21 @@ def run(*, athena_root: Path, channel: str = "", source_spec: str = "", branch: 
     port = int(port or os.environ.get("ATHENA_PORT") or 8765)
     target_channel = (channel or installed_channel).strip().lower()
     if target_channel not in channels.CHANNELS:
+        _refuse("unknown channel", channel=target_channel, known=list(channels.CHANNELS))
         raise WizardError(f"unknown channel {target_channel!r}; choose {', '.join(channels.CHANNELS)}")
 
     if branch:
         branch_channel = channels.channel_for_branch(branch)
         if channel and branch_channel != target_channel:
+            _refuse("branch and channel disagree", branch=branch, branch_channel=branch_channel,
+                    channel=target_channel)
             raise WizardError(f"branch {branch!r} carries {branch_channel}, but --channel says {target_channel}")
         target_channel = branch_channel
     target_branch = branch or channels.branch_for(target_channel)
+    trace.event("updater.check", channel=LANE, installed=installed, installed_channel=installed_channel,
+                target_channel=target_channel, branch=target_branch, port=port,
+                check_only=check_only, dry_run=dry_run)
+
 
     # 1 · source
     _step(1, 7, "Where the build comes from")
@@ -108,6 +123,9 @@ def run(*, athena_root: Path, channel: str = "", source_spec: str = "", branch: 
     _say("    branches: main=stable · beta=beta · alpha=alpha")
 
     if check_only and src.kind != "path":
+        trace.event("updater.checked", channel=LANE, installed=installed, installed_channel=installed_channel,
+                    target_channel=target_channel, branch=target_branch,
+                    result="reported only, nothing fetched")
         return {"checked": True, "installed": installed, "channel": installed_channel,
                 "target_channel": target_channel, "target_branch": target_branch}
 
@@ -119,28 +137,41 @@ def run(*, athena_root: Path, channel: str = "", source_spec: str = "", branch: 
     try:
         tree, facts = src.fetch(target_branch, staging)
     except source_mod.SourceError as exc:
+        _refuse("the build could not be fetched", source=src.describe(target_branch), error=str(exc)[:200])
         raise WizardError(str(exc)) from exc
     tree_facts = source_mod.tree_facts(tree)
     _say(f"    {tree_facts['version']} · {tree_facts['channel']} · {tree_facts['files']} files")
     _say(f"    sha256 {tree_facts['sha256'][:16]}…  ({facts.get('archive_sha256', 'no archive')[:16]}…)")
+    trace.event("updater.available", channel=LANE, version=tree_facts["version"], channel_name=tree_facts["channel"],
+                files=tree_facts["files"], sha256=tree_facts["sha256"][:12], source=src.describe(target_branch),
+                archive=facts.get("archive_sha256", "")[:12] or None)
 
     try:
         channels.check_pair(tree_facts["version"], target_branch)
     except channels.ChannelError as exc:
+        _refuse("branch and version disagree", branch=target_branch, version=tree_facts["version"],
+                error=str(exc)[:200])
         raise WizardError(f"{exc} — refused, nothing was changed") from exc
 
     order = channels.compare(tree_facts["version"], installed)
     _say(f"    installed is {installed}, available is {tree_facts['version']} "
          f"({'newer' if order > 0 else 'the same' if order == 0 else 'OLDER'})")
+    trace.event("updater.compare", channel=LANE, installed=installed, available=tree_facts["version"],
+                order={1: "newer", 0: "same", -1: "older"}[order])
     if order < 0 and not yes:
+        _refuse("the available build is older than the installed one", installed=installed,
+                available=tree_facts["version"], branch=target_branch)
         raise WizardError(f"{tree_facts['version']} is older than {installed} — refusing to move backwards "
                           f"on channel {target_channel}; pass --yes only if you mean it")
 
     if dry_run:
         shutil.rmtree(staging, ignore_errors=True)
         _say("\n    dry run: nothing was changed")
+        trace.event("updater.dry_run", channel=LANE, installed=installed, available=tree_facts["version"],
+                    branch=target_branch)
         return {"dry_run": True, "installed": installed, "available": tree_facts,
                 "target_channel": target_channel, "target_branch": target_branch, "source": src.describe(target_branch)}
+
 
     # 4 · the change
     _step(4, 7, "The change")
@@ -152,6 +183,7 @@ def run(*, athena_root: Path, channel: str = "", source_spec: str = "", branch: 
     # 5 · confirm
     _step(5, 7, "Confirm")
     if not _confirm(f"install {tree_facts['version']} and restart Athena on port {port}?", yes=yes):
+        _refuse("the operator declined", available=tree_facts["version"], installed=installed)
         raise WizardError("declined — nothing was changed")
 
     # 6 · apply
@@ -167,6 +199,7 @@ def run(*, athena_root: Path, channel: str = "", source_spec: str = "", branch: 
         apply_mod.record(state_dir, row)
         raise WizardError(str(exc)) from exc
     except Exception as exc:                          # noqa: BLE001 — a crash must still be recorded
+        trace.failure("updater.failed", exc, channel=LANE, installed=installed, available=tree_facts["version"])
         row.update({"ok": False, "error": f"{type(exc).__name__}: {exc}"})
         apply_mod.record(state_dir, row)
         raise
@@ -181,6 +214,8 @@ def run(*, athena_root: Path, channel: str = "", source_spec: str = "", branch: 
     row.update({"ok": True, "to": result["to"], "backup": result["backup"]["zip"],
                 "backup_sha256": result["backup"]["sha256"]})
     apply_mod.record(state_dir, row)
+    trace.event("updater.result", channel=LANE, ok=True, installed=result["from"], version=result["to"],
+                branch=target_branch, previous_tree=result["previous_tree"], backup=Path(result["backup"]["zip"]).name)
 
     if not keep_staging:
         shutil.rmtree(staging, ignore_errors=True)
@@ -203,7 +238,10 @@ def status(*, athena_root: Path) -> dict:
             last = json.loads(history.read_text(encoding="utf-8").strip().splitlines()[-1])
         except (ValueError, IndexError):
             last = {}
+    previous = sorted(p.name for p in athena_root.glob("athena-agent.prev-*"))
+    trace.event("updater.status", channel=LANE, installed=version, channel_name=channels.channel_of(version),
+                last_to=last.get("to"), last_ok=last.get("ok"), previous_trees=len(previous))
     return {"installed": version, "channel": channels.channel_of(version),
             "branch": channels.branch_for(channels.channel_of(version)),
             "state": state, "last": last,
-            "previous_trees": sorted(p.name for p in athena_root.glob("athena-agent.prev-*"))}
+            "previous_trees": previous}

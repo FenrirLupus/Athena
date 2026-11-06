@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import threading
 
-
+from core import trace
 
 
 class IterationBudget:
@@ -22,24 +22,43 @@ class IterationBudget:
         self.turns = 0
         self.cost_usd = 0.0
         self.grace_used = 0
+        self.lane = ""                    # set by `enter`, so a spend line names the turn it belongs to
         self._lock = threading.Lock()
 
     # -- spending ----------------------------------------------------------
     def consume_turn(self) -> bool:
         """Take one call from the budget. Returns False when it is gone."""
         with self._lock:
+            detail = {"turns": self.turns, "max_turns": self.max_turns,
+                      "cost_usd": round(self.cost_usd, 6), "max_usd": self.max_usd}
             if self.turns < self.max_turns and self.cost_usd < self.max_usd:
                 self.turns += 1
-                return True
-            if self.grace_used < self.grace_calls:
+                detail["turns"] = self.turns
+                granted, grace, reason = True, False, ""
+            elif self.grace_used < self.grace_calls:
                 self.grace_used += 1
                 self.turns += 1
-                return True
-            return False
+                detail.update({"turns": self.turns, "grace_used": self.grace_used,
+                               "grace_calls": self.grace_calls})
+                granted, grace, reason = True, True, ""
+            else:
+                granted, grace = False, False
+                reason = ("cost" if self.cost_usd >= self.max_usd else "turns")
+        if granted:
+            trace.event("budget.turn", level="debug", channel=self.lane, grace=grace, **detail)
+        else:
+            # the ceiling that actually stopped the turn, with the number that hit it — the Nov 5 error was read
+            # for an hour because "exhausted" did not say which limit or how close the other one was
+            trace.event("budget.exhausted", level="info", channel=self.lane, reason=reason, **detail)
+        return granted
 
     def record_cost(self, usd: float) -> None:
         with self._lock:
-            self.cost_usd += max(0.0, float(usd or 0.0))
+            delta = max(0.0, float(usd or 0.0))
+            self.cost_usd += delta
+            total, ceiling = self.cost_usd, self.max_usd
+        trace.event("budget.cost", level="debug", channel=self.lane, usd=round(delta, 6),
+                    cost_usd=round(total, 6), max_usd=ceiling)
 
 
     # -- inspection --------------------------------------------------------
@@ -64,6 +83,12 @@ class IterationBudget:
             grant = min(int(allocation), remaining)
             self.turns += grant                      # the carve-out is spent, not copied
             child_usd = self.max_usd - self.cost_usd if usd is None else float(usd)
+            parent_turns, parent_usd = self.turns, self.max_usd
+        # the deduction is the boundary a child can starve its parent across: log both sides, not just the grant
+        trace.event("budget.child", level="info", channel=getattr(self, "lane", ""),
+                    allocation=int(allocation), granted=grant, parent_remaining=remaining,
+                    parent_turns=parent_turns, parent_max_turns=self.max_turns,
+                    child_usd=round(max(child_usd, 0.0), 6), parent_max_usd=parent_usd)
         return IterationBudget(max_turns=max(grant, 1), max_usd=max(child_usd, 0.0),
                               grace_calls=1)
 
@@ -88,11 +113,19 @@ _ACTIVE_LOCK = __import__("threading").Lock()
 def enter(lane: str, budget: "IterationBudget") -> None:
     with _ACTIVE_LOCK:
         _ACTIVE_RUNS[str(lane)] = budget
+        budget.lane = str(lane)          # every spend from this budget now names its turn
+    trace.event("budget.enter", level="debug", channel=str(lane),
+                turns=budget.turns, max_turns=budget.max_turns,
+                cost_usd=round(budget.cost_usd, 6), max_usd=budget.max_usd)
 
 
 def leave(lane: str) -> None:
     with _ACTIVE_LOCK:
-        _ACTIVE_RUNS.pop(str(lane), None)
+        budget = _ACTIVE_RUNS.pop(str(lane), None)
+    if budget is not None:
+        trace.event("budget.leave", level="debug", channel=str(lane),
+                    turns=budget.turns, max_turns=budget.max_turns,
+                    cost_usd=round(budget.cost_usd, 6), max_usd=budget.max_usd)
 
 
 def active(lane: str) -> "IterationBudget | None":

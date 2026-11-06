@@ -26,8 +26,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import channels
+from core import trace
 
 USER_AGENT = "athena-updater/1"
+LANE = "updater"
 TREE_NAME = "athena-agent"
 
 
@@ -84,23 +86,27 @@ class Source:
         staging = Path(staging)
         staging.mkdir(parents=True, exist_ok=True)
         facts: dict = {"kind": self.kind, "branch": branch, "source": self.describe(branch)}
+        with trace.span("updater.fetch", channel=LANE, kind=self.kind, branch=branch,
+                        source=self.describe(branch), staging=staging.name) as sp:
+            if self.kind == "path":
+                origin = Path(self.location) / TREE_NAME if (Path(self.location) / TREE_NAME).is_dir() else Path(self.location)
+                if not origin.is_dir():
+                    raise SourceError(f"{self.location} is not a directory")
+                facts["origin"] = str(origin)
+                sp.ok(origin=str(origin), tree=origin.name)
+                return origin, facts
 
-        if self.kind == "path":
-            origin = Path(self.location) / TREE_NAME if (Path(self.location) / TREE_NAME).is_dir() else Path(self.location)
-            if not origin.is_dir():
-                raise SourceError(f"{self.location} is not a directory")
-            facts["origin"] = str(origin)
-            return origin, facts
-
-        if self.kind == "github":
-            url = f"https://codeload.github.com/{self.repo}/tar.gz/refs/heads/{branch}"
-        else:
-            url = self.location
-        archive = staging / ("build.tar.gz" if url.endswith(".gz") else "build.archive")
-        self._download(url, archive)
-        facts["archive_sha256"] = hashlib.sha256(archive.read_bytes()).hexdigest()
-        facts["archive"] = str(archive)
-        tree = _extract(archive, staging)
+            if self.kind == "github":
+                url = f"https://codeload.github.com/{self.repo}/tar.gz/refs/heads/{branch}"
+            else:
+                url = self.location
+            archive = staging / ("build.tar.gz" if url.endswith(".gz") else "build.archive")
+            self._download(url, archive)
+            facts["archive_sha256"] = hashlib.sha256(archive.read_bytes()).hexdigest()
+            facts["archive"] = str(archive)
+            tree = _extract(archive, staging)
+            sp.ok(archive_bytes=archive.stat().st_size, sha256=facts["archive_sha256"][:12],
+                  tree=tree.name)
         return tree, facts
 
 

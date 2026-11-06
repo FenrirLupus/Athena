@@ -23,6 +23,7 @@ from pathlib import Path
 
 import yaml
 from core import durable
+from core import trace
 
 FILENAME = "config.yaml"          # the SAME filename as the global config — one name, one schema
 LEGACY_FILENAME = "agent.yaml"    # the pre-rename name; still read, migrated on first load
@@ -351,8 +352,12 @@ def path(profile_root: Path) -> Path:
     if not target.exists() and legacy.exists():
         try:
             legacy.rename(target)                 # one-time, in place, no content change
-        except OSError:
+        except OSError as exc:
+            trace.failure("agentconfig.legacy", exc, channel=root.name, rule="read-only-tree",
+                          file=legacy.name)
             return legacy                         # read-only tree: the legacy key spelling still resolves
+        trace.event("agentconfig.migrate", level="info", channel=root.name, rule="legacy-rename",
+                    source=legacy.name, target=target.name)
     return target
 
 
@@ -361,13 +366,31 @@ def read(profile_root: Path) -> dict:
     target = path(profile_root)
     try:
         data = yaml.safe_load(target.read_text(encoding="utf-8")) or {}
-    except (OSError, yaml.YAMLError):
+    except FileNotFoundError:
+        trace.event("agentconfig.absent", level="debug", channel=Path(profile_root).name,
+                    rule="inherit-global")
+        return {}
+    except (OSError, yaml.YAMLError) as exc:
+        # falling back to {} means the agent quietly loses its persona, model and endpoint: say which file
+        # the YAML error's own message quotes the offending line, so only the class is recorded
+        detail = (f"{type(exc).__name__}: {exc.strerror or exc}" if isinstance(exc, OSError)
+                  else type(exc).__name__)
+        trace.failure("agentconfig.fallback", None, channel=Path(profile_root).name,
+                      rule="unreadable-as-empty", path=str(target), error=detail)
         return {}
     if not isinstance(data, dict):
+        trace.failure("agentconfig.fallback", None, channel=Path(profile_root).name,
+                      rule="not-a-mapping", path=str(target),
+                      error=f"top level is {type(data).__name__}")
         return {}
     merged = {**DEFAULTS, **data}
     merged["persona"] = {**DEFAULTS["persona"], **(data.get("persona") or {})}
     merged["model"] = {**DEFAULTS["model"], **(data.get("model") or {})}
+    blanks = [f"{section}.{key}" for section, keys in BLANK_BY_DESIGN.items()
+              for key in keys if (merged.get(section) or {}).get(key) is None]
+    if blanks:
+        trace.event("agentconfig.blank", level="debug", channel=Path(profile_root).name,
+                    rule="blank-means-inherit", keys=blanks)
     return merged
 
 
@@ -412,7 +435,16 @@ def write(profile_root: Path, config: dict, base: dict | None = None) -> Path:
         existing_text = (Path(profile_root) / FILENAME).read_text(encoding="utf-8")
     except OSError:
         pass
-    accent = str(config.get("accent") or existing.get("accent") or random_accent())
+    supplied = config.get("accent") or ""
+    kept = existing.get("accent") or ""
+    if supplied:
+        accent, accent_rule = str(supplied), "configured"
+    elif kept:
+        accent, accent_rule = str(kept), "kept-from-existing-file"
+    else:
+        accent, accent_rule = random_accent(), "assigned-once"
+    trace.event("agentconfig.accent", level="debug", channel=Path(profile_root).name,
+                rule=accent_rule, accent=accent)
     persona = {**DEFAULTS["persona"], **(config.get("persona") or {})}
     persona["accent"] = accent
     model = {**DEFAULTS["model"], **(config.get("model") or {})}
@@ -424,10 +456,15 @@ def write(profile_root: Path, config: dict, base: dict | None = None) -> Path:
     # the lane's own plugin list, carried through a re-save: `None` means inherit, so it must stay blank rather
     # than become the ceiling (which would freeze it at creation time)
     plugin_list = None
-    for source in (config.get("plugins"), existing.get("plugins")):
+    plugin_rule = "inherit-global"
+    for source, label in ((config.get("plugins"), "lane-config"), (existing.get("plugins"), "lane-file")):
         if isinstance(source, dict) and source.get("enabled") is not None:
             plugin_list = source.get("enabled")
+            plugin_rule = label
             break
+    trace.event("agentconfig.plugins", level="debug", channel=Path(profile_root).name,
+                rule=plugin_rule,
+                **({"count": len(plugin_list)} if isinstance(plugin_list, list) else {}))
 
     values: dict = {
         "plugins": {"enabled": plugin_list},
@@ -520,7 +557,10 @@ def as_cfg(agent_cfg: dict, base_cfg: dict) -> dict:
     agent_model = agent_cfg.get("model") or {}
 
     # no `provider` declared: keep the global wire format rather than silently forcing "openai"
-    provider = str(agent_model.get("provider") or (model.get("provider") or "openai")).lower()
+    declared = str(agent_model.get("provider") or "").strip()
+    provider = str(declared or (model.get("provider") or "openai")).lower()
+    if not declared:
+        trace.event("agentconfig.provider", level="debug", rule="inherit-global", provider=provider)
     local_declared = agent_model.get("local")
     local_active = (provider == "local"
                     or (isinstance(local_declared, dict) and bool(local_declared.get("enabled"))))
@@ -545,6 +585,8 @@ def as_cfg(agent_cfg: dict, base_cfg: dict) -> dict:
             # an anthropic agent would have posted to the deepseek URL
             from providers.base import DEFAULT_BASE_URLS
             model["base_url"] = DEFAULT_BASE_URLS.get(provider, "")
+            trace.event("agentconfig.endpoint", level="debug", rule="default-for-wire-format",
+                        provider=provider, base_url=model["base_url"])
         model["name"] = str(agent_model.get("name") or model.get("name") or "")
 
     for key in ("window", "max_output_tokens", "temperature", "key_name", "context_window_local",
@@ -564,4 +606,6 @@ def as_cfg(agent_cfg: dict, base_cfg: dict) -> dict:
             for key, value in agent_section.items():
                 if value is not None:
                     merged_section[key] = value
+    trace.event("agentconfig.apply", level="debug", provider=str(model.get("provider") or ""),
+                model=str(model.get("name") or ""), local=bool((model.get("local") or {}).get("enabled")))
     return cfg

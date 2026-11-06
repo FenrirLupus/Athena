@@ -27,8 +27,10 @@ from pathlib import Path
 
 from . import channels
 from core import timefmt
+from core import trace
 
 TREE_NAME = "athena-agent"
+LANE = "updater"
 
 
 class ApplyError(RuntimeError):
@@ -47,25 +49,25 @@ def backup(live: Path, backups_dir: Path, version: str) -> dict:
     backups_dir.mkdir(parents=True, exist_ok=True)
     stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
     target = backups_dir / f"updater-{version}-{stamp}.zip"
-    names = []
-    with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as bundle:
-        for path in sorted(live.rglob("*")):
-            if not path.is_file() or "__pycache__" in path.parts or path.suffix == ".pyc":
-                continue
-            names.append(str(path.relative_to(live)))
-            bundle.write(path, str(path.relative_to(live)))
-    digest = hashlib.sha256(target.read_bytes()).hexdigest()
-    sidecar = target.with_suffix(".zip.sha256")
-    sidecar.write_text(f"{digest}  {target.name}\n", encoding="utf-8")
-    listing = target.with_suffix(".filelist.txt")
-    listing.write_text("\n".join(names) + "\n", encoding="utf-8")
-    with zipfile.ZipFile(target) as check:
-        bad = check.testzip()
-    if bad is not None:
-        raise ApplyError(f"the backup {target.name} is not readable (first bad member: {bad}) — stopping before any change")
+    with trace.span("updater.backup", channel=LANE, version=version, tree=live.name) as sp:
+        names = []
+        with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as bundle:
+            for path in sorted(live.rglob("*")):
+                if not path.is_file() or "__pycache__" in path.parts or path.suffix == ".pyc":
+                    continue
+                names.append(str(path.relative_to(live)))
+                bundle.write(path, str(path.relative_to(live)))
+        digest = hashlib.sha256(target.read_bytes()).hexdigest()
+        sidecar = target.with_suffix(".zip.sha256")
+        sidecar.write_text(f"{digest}  {target.name}\n", encoding="utf-8")
+        listing = target.with_suffix(".filelist.txt")
+        listing.write_text("\n".join(names) + "\n", encoding="utf-8")
+        with zipfile.ZipFile(target) as check:
+            bad = check.testzip()
+        if bad is not None:
+            raise ApplyError(f"the backup {target.name} is not readable (first bad member: {bad}) — stopping before any change")
+        sp.ok(files=len(names), bytes=target.stat().st_size, sha256=digest[:12], zip=target.name)
     return {"zip": str(target), "sha256": digest, "files": len(names)}
-
-
 
 
 # -- server control ------------------------------------------------------------------------------------------------
@@ -107,19 +109,24 @@ def start_server(live: Path, port: int, log_path: Path) -> subprocess.Popen:
 def health(port: int, expect_version: str = "", timeout: float = 90.0) -> dict:
     """Poll /health until it answers — and, when asked, until it answers with the version we just installed."""
     url = f"http://127.0.0.1:{int(port)}/health"
-    deadline = time.time() + timeout
-    last = ""
-    while time.time() < deadline:
-        try:
-            with urllib.request.urlopen(url, timeout=4) as response:
-                payload = json.loads(response.read().decode("utf-8"))
-            if not expect_version or str(payload.get("version")) == str(expect_version):
-                return payload
-            last = f"/health answers {payload.get('version')} (wanted {expect_version})"
-        except (urllib.error.URLError, OSError, ValueError) as exc:
-            last = str(exc)
-        time.sleep(1.0)
-    raise ApplyError(f"the new build never answered {url}: {last}")
+    with trace.span("updater.health", channel=LANE, port=port, expect=expect_version or "*",
+                    timeout_s=timeout) as sp:
+        deadline = time.time() + timeout
+        last = ""
+        polls = 0
+        while time.time() < deadline:
+            polls += 1
+            try:
+                with urllib.request.urlopen(url, timeout=4) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+                if not expect_version or str(payload.get("version")) == str(expect_version):
+                    sp.ok(version=payload.get("version"), channel_name=payload.get("channel"), polls=polls)
+                    return payload
+                last = f"/health answers {payload.get('version')} (wanted {expect_version})"
+            except (urllib.error.URLError, OSError, ValueError) as exc:
+                last = str(exc)
+            time.sleep(1.0)
+        raise ApplyError(f"the new build never answered {url}: {last}")
 
 
 # -- the swap ------------------------------------------------------------------------------------------------------
@@ -131,56 +138,63 @@ def install(staged: Path, live: Path, *, backups_dir: Path, port: int, branch: s
     new_version = channels.read_version(staged)
     channels.check_pair(new_version, branch)
 
-    steps: list[dict] = []
+    with trace.span("updater.apply", channel=LANE, installed=old_version, candidate=new_version,
+                    branch=branch, port=port, dry_run=dry_run) as sp:
+        steps: list[dict] = []
 
-    def step(name: str, note: str = "", ok: bool = True) -> None:
-        steps.append({"step": name, "ok": ok, "note": note})
+        def step(name: str, note: str = "", ok: bool = True) -> None:
+            steps.append({"step": name, "ok": ok, "note": note})
+            # the ordered trail: verify → backup → stop → park → swap → health, each with what it produced
+            trace.event("updater.step", channel=LANE, step=name, ok=ok, note=note)
 
-    step("verify", f"{old_version} → {new_version} on branch {branch}")
-    if dry_run:
-        step("dry-run", "nothing was changed")
-        return {"from": old_version, "to": new_version, "branch": branch, "steps": steps, "dry_run": True}
+        step("verify", f"{old_version} → {new_version} on branch {branch}")
+        if dry_run:
+            step("dry-run", "nothing was changed")
+            sp.ok(dry_run=True, steps=len(steps))
+            return {"from": old_version, "to": new_version, "branch": branch, "steps": steps, "dry_run": True}
 
-    saved = backup(live, backups_dir, old_version)
-    step("backup", saved["zip"])
+        saved = backup(live, backups_dir, old_version)
+        step("backup", saved["zip"])
 
-    stop_server(live, port)
-    step("stop", f"port {port} is free")
+        stop_server(live, port)
+        step("stop", f"port {port} is free")
 
-    previous = live.with_name(f"{live.name}.prev-{old_version}")
-    if previous.exists():                             # a leftover from an interrupted run: keep the newest, drop the old
-        shutil.rmtree(previous)
-    os.replace(live, previous)
-    step("park", str(previous))
+        previous = live.with_name(f"{live.name}.prev-{old_version}")
+        if previous.exists():                             # a leftover from an interrupted run: keep the newest, drop the old
+            shutil.rmtree(previous)
+        os.replace(live, previous)
+        step("park", str(previous))
 
-    try:
-        shutil.copytree(staged, live, dirs_exist_ok=False,
-                        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
-    except OSError as exc:
-        os.replace(previous, live)
-        start_server(live, port, logs_dir / "updater-serve.log")
-        raise ApplyError(f"could not write the new tree ({exc}); the previous one is back in place") from exc
-    step("swap", f"{live.name} now holds {new_version}")
-
-    try:
-        start_server(live, port, logs_dir / "updater-serve.log")
-        answered = health(port, expect_version=new_version, timeout=health_timeout)
-        step("health", f"version {answered.get('version')} · channel {answered.get('channel')}")
-    except (ApplyError, OSError) as exc:
-        stop_server(live, port, timeout=20.0) if not port_free(port) else None
-        shutil.rmtree(live, ignore_errors=True)
-        os.replace(previous, live)
-        start_server(live, port, logs_dir / "updater-serve.log")
         try:
-            health(port, expect_version=old_version, timeout=max(20.0, health_timeout))
-            restored = f"{old_version} is running again"
-        except ApplyError:
-            restored = f"{old_version} was put back but has not answered /health yet — check the log"
-        raise ApplyError(f"the new build failed its health check ({exc}). Rolled back: {restored}",
-                         rolled_back=True) from exc
+            shutil.copytree(staged, live, dirs_exist_ok=False,
+                            ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+        except OSError as exc:
+            os.replace(previous, live)
+            start_server(live, port, logs_dir / "updater-serve.log")
+            raise ApplyError(f"could not write the new tree ({exc}); the previous one is back in place") from exc
+        step("swap", f"{live.name} now holds {new_version}")
 
-    return {"from": old_version, "to": new_version, "branch": branch, "steps": steps,
-            "backup": saved, "previous_tree": str(previous), "health": answered}
+        try:
+            start_server(live, port, logs_dir / "updater-serve.log")
+            answered = health(port, expect_version=new_version, timeout=health_timeout)
+            step("health", f"version {answered.get('version')} · channel {answered.get('channel')}")
+        except (ApplyError, OSError) as exc:
+            stop_server(live, port, timeout=20.0) if not port_free(port) else None
+            shutil.rmtree(live, ignore_errors=True)
+            os.replace(previous, live)
+            start_server(live, port, logs_dir / "updater-serve.log")
+            try:
+                health(port, expect_version=old_version, timeout=max(20.0, health_timeout))
+                restored = f"{old_version} is running again"
+            except ApplyError:
+                restored = f"{old_version} was put back but has not answered /health yet — check the log"
+            raise ApplyError(f"the new build failed its health check ({exc}). Rolled back: {restored}",
+                             rolled_back=True) from exc
+
+        sp.ok(version=answered.get("version"), channel_name=answered.get("channel"), steps=len(steps),
+              previous_tree=previous.name, backup=Path(saved["zip"]).name)
+        return {"from": old_version, "to": new_version, "branch": branch, "steps": steps,
+                "backup": saved, "previous_tree": str(previous), "health": answered}
 
 
 # -- record --------------------------------------------------------------------------------------------------------
@@ -199,3 +213,6 @@ def record(state_dir: Path, row: dict) -> None:
         (state_dir / "state.json").write_text(json.dumps(current, indent=2), encoding="utf-8")
     except OSError:
         pass
+    trace.event("updater.record", channel=LANE, to=row.get("to") or "?", ok=current["ok"],
+                rolled_back=bool(row.get("rolled_back")), channel_name=current["channel"],
+                error=str(row.get("error") or "")[:200] or None)

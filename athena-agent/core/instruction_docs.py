@@ -29,6 +29,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from core import trace
+
 FOLDER = Path(__file__).resolve().parent.parent / "instructions"
 MAX_SENT = 2
 
@@ -57,6 +59,8 @@ def _parse(path: Path) -> dict:
                     try:
                         meta["priority"] = int(value)
                     except ValueError:
+                        # an unparsable priority silently becomes the lowest one — name the file and the value
+                        trace.event("instruction.priority.default", level="debug", path=str(path), value=value[:40])
                         meta["priority"] = 0
                 elif key == "name" and value:
                     meta["name"] = value.strip('"').strip("'")
@@ -79,7 +83,9 @@ def discover(folder: Path | None = None) -> list[dict]:
     for path in sorted(base.glob("*.md")):
         try:
             docs.append(_parse(path))
-        except OSError:
+        except OSError as exc:
+            # a required procedure that cannot be read is skipped, not raised: the skip is the finding
+            trace.event("instruction.skipped", level="debug", path=str(path), error=type(exc).__name__)
             continue
     return sorted(docs, key=lambda d: (-int(d.get("priority") or 0), d["name"]))
 
@@ -93,7 +99,9 @@ def _matches(trigger: str, text: str, lowered: str) -> bool:
     if trigger.lower().startswith("re:"):
         try:
             return re.search(trigger[3:], text, re.I) is not None
-        except re.error:
+        except re.error as exc:
+            # a malformed pattern never fires — silently, unless it says so here
+            trace.event("instruction.trigger.invalid", level="debug", trigger=trigger[:80], error=str(exc)[:120])
             return False
     return trigger.lower() in lowered
 
@@ -112,6 +120,8 @@ def select(text: str, folder: Path | None = None, limit: int = MAX_SENT) -> list
                 break
         if len(hits) >= limit:
             break
+    trace.event("instruction.select", level="debug", matched=len(hits),
+                names=[doc["name"] for doc in hits][:5], limit=limit)
     return hits
 
 

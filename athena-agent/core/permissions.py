@@ -35,6 +35,7 @@ from core import identity
 from core.approvals import ALLOW, DENY, ONCE, PERMANENT, SCOPES, SESSION, Decision
 from core.jsonio import read_json
 from core import durable
+from core import trace
 
 STORE = "permissions.json"
 HISTORY_KEEP = 200
@@ -50,6 +51,11 @@ UNAVAILABLE = ("the user is not available at the moment (no answer in {span}). R
 
 class PermissionError_(Exception):
     """An ask that cannot be honoured: unknown kind, expired, already answered."""
+
+
+def _refusal(exc: BaseException, **fields) -> None:
+    """Trace a refusal before it is raised — the exception has no frame yet, so `where` would be `?`."""
+    trace.failure("permission.refused", None, error=f"{type(exc).__name__}: {exc}", **fields)
 
 
 class PermissionManager:
@@ -127,8 +133,11 @@ class PermissionManager:
             spec = self._executors.get(kind)
         if spec is None:
             # deny-first: an unregistered kind is not "open", it is unknown, and unknown is never allowed
-            raise PermissionError_(f"no such permission kind {kind!r} — registered: "
+            exc = PermissionError_(f"no such permission kind {kind!r} — registered: "
                                    f"{', '.join(sorted(self._executors)) or 'none'}")
+            _refusal(exc, channel=str(agent), kind=kind,
+                     rule="unregistered-kind", registered=", ".join(sorted(self._executors)) or "none")
+            raise exc
 
         wait = bool(spec["blocking"]) if wait is None else bool(wait)
         span = float(self.timeout_s if timeout_s is None else timeout_s)
@@ -148,6 +157,12 @@ class PermissionManager:
             if event is not None:
                 self._events[rid] = event
         self._record("asked", f"{kind}: {row['summary']}", lane=row["agent"])
+        asked = {"channel": row["agent"], "id": rid, "kind": kind,
+                 "target": ", ".join(row["targets"]), "blocking": wait,
+                 "reason": row["reason"] or "-"}
+        if wait:
+            asked["timeout_s"] = span
+        trace.event("permission.ask", **asked)
 
         if not wait:
             return dict(row)
@@ -159,6 +174,9 @@ class PermissionManager:
             decision = self._decisions.pop(rid, None)
 
         if not answered or decision is None:
+            trace.failure("permission.absent", None, channel=row["agent"], id=rid, kind=kind,
+                          target=", ".join(row["targets"]), waited_s=round(span, 3),
+                          outcome="timeout-deny")
             self._settle(row, DENY, ONCE, note="timeout")
             return Decision(False, ONCE, UNAVAILABLE.format(span=self._span(span), what=row["summary"]))
         return decision
@@ -182,9 +200,13 @@ class PermissionManager:
                     listed = set()
                 if str(rid) in listed:
                     self._record("answered", f"{kind}: {rid} → {decision}", lane="")
+                    trace.event("permission.answer", channel="permissions", id=rid, kind=kind,
+                                decision=decision, attached=True)
                     return {"id": rid, "kind": kind, "decision": decision,
                             "result": spec["resolve"](rid, decision)}
-            raise PermissionError_(f"{rid} is not pending — it was answered already, or it expired")
+            exc = PermissionError_(f"{rid} is not pending — it was answered already, or it expired")
+            _refusal(exc, channel="permissions", id=rid, rule="not-pending", decision=decision)
+            raise exc
         with self._lock:
             if row.get("blocking") and row.get("expires_at") and time.time() > row["expires_at"]:
                 self._asks.pop(rid, None)
@@ -195,14 +217,22 @@ class PermissionManager:
                 late = False
 
         if late:
+            trace.failure("permission.refused", None, channel=row["agent"], id=rid, kind=row["kind"],
+                          target=", ".join(row.get("targets") or []), rule="expired",
+                          outcome="late-deny")
             self._settle(row, DENY, ONCE, note="late")
             raise PermissionError_(f"{rid} expired before the answer arrived — the agent has already been told the "
                                    f"user was unavailable")
 
         if decision not in row["actions"]:
-            raise PermissionError_(f"{decision!r} is not one of this ask's actions ({', '.join(row['actions'])})")
+            exc = PermissionError_(f"{decision!r} is not one of this ask's actions ({', '.join(row['actions'])})")
+            _refusal(exc, channel=row["agent"], id=rid, kind=row["kind"],
+                     rule="action-not-offered", decision=decision, offered=", ".join(row["actions"]))
+            raise exc
         if scope not in SCOPES:
-            raise PermissionError_(f"scope must be one of {', '.join(SCOPES)}")
+            exc = PermissionError_(f"scope must be one of {', '.join(SCOPES)}")
+            _refusal(exc, channel=row["agent"], id=rid, kind=row["kind"], rule="bad-scope", scope=scope)
+            raise exc
         if decision == DENY:
             scope = ONCE                       # a denial is never remembered
 
@@ -213,6 +243,9 @@ class PermissionManager:
             self._remember(row, scope)
 
         self._settle(row, decision, scope)
+        trace.event("permission.answer", channel=row["agent"], id=rid, kind=row["kind"],
+                    target=", ".join(row.get("targets") or []), decision=decision, scope=scope,
+                    blocking=bool(row.get("blocking")))
         with self._lock:
             self._decisions[rid] = verdict
             event = self._events.pop(rid, None)
@@ -252,6 +285,8 @@ class PermissionManager:
         try:
             result = run(row, action)
         except Exception as exc:                  # noqa: BLE001 — a failed action is a message, not a crash
+            trace.failure("permission.action.failed", exc, channel=row["agent"], kind=row["kind"],
+                          target=", ".join(row.get("targets") or []), action=action)
             self._record("failed", f"{row['kind']}: {row['summary']} → {type(exc).__name__}: {exc}", lane=row["agent"])
             return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
         row["result"] = result
@@ -299,6 +334,9 @@ class PermissionManager:
                                                                 and g["targets"] == targets)]
                 self._grants.append(entry)
             self._save()
+            trace.event("permission.grant", channel=row["agent"], scope=PERMANENT, kind=row["kind"],
+                        agent_id=entry["agent_id"], targets=", ".join(targets),
+                        flags=", ".join(flags) or "-")
             if row["kind"] == "path" and callable(self.on_permanent):
                 for target in targets:
                     from pathlib import Path as _P
@@ -309,6 +347,8 @@ class PermissionManager:
                         self.on_permanent(row["agent"], target)
                     except Exception as exc:   # noqa: BLE001 — a failed mirror must not lose the grant
                         # the grant stands (this store is the authority); say why the profile copy is missing
+                        trace.failure("permission.mirror.failed", exc, channel=row["agent"],
+                                      target=target, direction="grant")
                         self._record("mirror-failed", f"{row['agent']} {target}: {type(exc).__name__}: {exc}",
                                      lane=row["agent"])
             return
@@ -330,6 +370,9 @@ class PermissionManager:
                 entry = (str(prefix), frozenset(flags))
                 if entry not in bucket:
                     bucket.append(entry)
+        trace.event("permission.grant", channel=row["agent"], scope=SESSION, kind=row["kind"],
+                    agent_id=key, targets=", ".join(str(t) for t in targets or ["."]),
+                    flags=", ".join(flags) or "-")
 
     def grants(self, agent: str) -> list[tuple[str, frozenset]]:
         with self._lock:
@@ -345,6 +388,8 @@ class PermissionManager:
                 continue
             try:
                 target.relative_to(prefix)
+                trace.event("permission.scope", level="debug", channel=str(agent), path=str(target),
+                            flag=flag, allowed=True, rule="session-grant", prefix=str(prefix))
                 return True
             except ValueError:
                 continue
@@ -365,9 +410,14 @@ class PermissionManager:
                     continue
                 try:
                     target.relative_to(prefix)
+                    trace.event("permission.scope", level="debug", channel=str(agent), path=str(target),
+                                flag=flag, allowed=True, rule="permanent-grant", prefix=str(prefix),
+                                agent_id=grant.get("agent_id") or "unattributed")
                     return True
                 except ValueError:
                     continue
+        trace.event("permission.scope", level="debug", channel=str(agent), path=str(target),
+                    flag=flag, allowed=False, rule="no-grant", permanent_rows=len(permanent))
         return False
 
     def forget_session(self, agent: str) -> None:
@@ -411,9 +461,13 @@ class PermissionManager:
                     try:
                         self.on_revoke(grant["agent"], target)
                     except Exception as exc:   # noqa: BLE001 — the authority grant is already gone
+                        trace.failure("permission.mirror.failed", exc, channel=grant["agent"],
+                                      target=target, direction="revoke")
                         self._record("mirror-failed", f"revoke {grant['agent']} {target}: {exc}",
                                      lane=grant["agent"])
         self._record("revoked", f"agent={agent or '*'} kind={kind or '*'} removed={removed}")
+        trace.event("permission.revoke", channel=str(agent or "*"), kind=kind or "*",
+                    removed=removed, mirrors=len(dropped))
         return {"revoked": removed, "agent": agent, "kind": kind, "mirrors_cleared": len(dropped)}
 
     def policy(self) -> dict:
@@ -499,10 +553,15 @@ class PermissionManager:
             self._grants = [g for g in data["permanent"] if isinstance(g, dict)]
                 # A pending ask belonged to a turn whose process is gone; answering it would resume work nobody awaits.
         # nothing, so it is closed as expired rather than silently forgotten.
+        orphans = 0
         for row in data.get("pending") or []:
+            orphans += 1
             self._answered.append({"id": row.get("id"), "kind": row.get("kind"), "agent": row.get("agent"),
                                    "decision": "deny", "scope": ONCE, "summary": row.get("summary"),
                                    "at": row.get("asked_at"), "note": "orphaned by a restart"})
+        if orphans:
+            trace.event("permission.orphaned", channel="permissions", count=orphans,
+                        store=str(self.store), outcome="closed-as-deny")
 
     def _save(self) -> None:
         try:
@@ -512,8 +571,9 @@ class PermissionManager:
                                     "summary": row["summary"], "asked_at": row["asked_at"]}
                                    for row in self._asks.values() if row.get("blocking")]}
             durable.write_state(self.store, json.dumps(payload, indent=1))
-        except OSError:
-            pass
+        except OSError as exc:
+            trace.failure("permission.save.failed", exc, channel="permissions", store=str(self.store),
+                          grants=len(self._grants), pending=len(self._asks))
 
     def _record(self, kind: str, detail: str, lane: str = "") -> None:
         if self.ledger is not None:
@@ -550,6 +610,9 @@ def stamp_permission_rows(athena_root, profiles) -> dict:
             unresolved += 1
     if stamped:
         durable.write_state(path, json.dumps(data, indent=1))
+    if stamped or unresolved:
+        trace.event("permission.stamp", channel="permissions", stamped=stamped, unresolved=unresolved,
+                    store=str(path))
     return {"stamped": stamped, "unresolved": unresolved}
 
 

@@ -14,6 +14,8 @@ import threading
 import time
 from pathlib import Path
 
+from core import trace
+
 MAX_ROWS = 800
 
 _rows: collections.deque = collections.deque(maxlen=MAX_ROWS)
@@ -56,13 +58,20 @@ def install() -> logging.Handler:
     for target in targets:
         if not any(isinstance(h, Ring) for h in target.handlers):
             target.addHandler(handler)
+    trace.event("console.install", level="debug", channel="console", loggers=len(targets),
+                ring=MAX_ROWS)
     return handler
 
 
 def recent(since: int = 0, limit: int = 200) -> list[dict]:
     with _lock:
         rows = [row for row in _rows if row["seq"] > since]
-    return rows[-limit:] if limit else rows
+        backlog = _seq - since
+    out = rows[-limit:] if limit else rows
+    # a poll that falls behind the ring cannot be told from a quiet console without the gap
+    trace.event("console.recent", level="trace", channel="console", since=since, limit=limit,
+                rows=len(out), backlog=backlog, dropped=max(0, backlog - len(rows)))
+    return out
 
 
 def _log_dir() -> Path:
@@ -84,10 +93,11 @@ def _persist(row: dict) -> None:
 def history(page: int = 1, size: int = 128) -> dict:
     """Dated log files, newest first, cut into pages of `size` lines."""
     size = max(1, min(int(size or 128), 512))
-    rows = []
+    rows, skipped = [], 0
     try:
         files = sorted(_log_dir().glob("console-*.jsonl"), reverse=True)
-    except Exception:
+    except Exception as exc:                          # noqa: BLE001 — an unreadable log dir is an empty console
+        trace.failure("console.history", exc, channel="console")
         files = []
     for path in files:
         try:
@@ -99,8 +109,10 @@ def history(page: int = 1, size: int = 128) -> dict:
                     try:
                         rows.append(json.loads(line))
                     except Exception:
+                        skipped += 1
                         continue
-        except Exception:
+        except Exception as exc:                      # noqa: BLE001 — one bad day-file must not hide the rest
+            trace.failure("console.history", exc, channel="console", file=path.name)
             continue
     rows.sort(key=lambda r: r.get("at") or 0, reverse=True)
     total = len(rows)
@@ -114,6 +126,8 @@ def history(page: int = 1, size: int = 128) -> dict:
             groups.append({"date": day, "rows": []})
             seen = day
         groups[-1]["rows"].append(row)
+    trace.event("console.history", level="debug", channel="console", page=page, size=size,
+                files=len(files), total=total, pages=pages, rows=len(chunk), skipped=skipped)
     return {"page": page, "pages": pages, "size": size, "total": total, "groups": groups}
 
 
@@ -181,7 +195,10 @@ def _classify(text: str) -> str:
 def tap_streams() -> None:
     """Mirror stdout and stderr into the ring exactly once."""
     import sys as _sys
+    tapped = []
     for name in ("stdout", "stderr"):
         stream = getattr(_sys, name, None)
         if stream is not None and not isinstance(stream, _Tee):
             setattr(_sys, name, _Tee(stream))
+            tapped.append(name)
+    trace.event("console.tap", level="debug", channel="console", streams=",".join(tapped) or "-")

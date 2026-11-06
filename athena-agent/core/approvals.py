@@ -28,6 +28,8 @@ import threading
 import time
 import uuid
 
+from core import trace
+
 ALLOW = "allow"
 DENY = "deny"
 ONCE, SESSION, PERMANENT = "once", "session", "permanent"
@@ -42,6 +44,11 @@ class Decision:
 
     def __repr__(self) -> str:
         return f"Decision(allowed={self.allowed}, scope={self.scope!r})"
+
+
+def _refusal(exc: BaseException, **fields) -> None:
+    """Trace a refusal before it is raised — the exception has no frame yet, so `where` would be `?`."""
+    trace.failure("approval.refused", None, error=f"{type(exc).__name__}: {exc}", **fields)
 
 
 class ApprovalBroker:
@@ -73,6 +80,8 @@ class ApprovalBroker:
         with self._lock:
             self._pending[rid] = row
             self._events[rid] = event
+        trace.event("approval.ask", channel=str(agent), id=rid, path=str(path), op=op,
+                    tool=tool or "direct", timeout_s=self.timeout_s, reason=reason or "-")
 
         answered = event.wait(timeout=self.timeout_s)
         with self._lock:
@@ -81,6 +90,8 @@ class ApprovalBroker:
             self._events.pop(rid, None)
 
         if not answered or decision is None:
+            trace.failure("approval.absent", None, channel=str(agent), id=rid, path=str(path), op=op,
+                          waited_s=round(self.timeout_s, 3), outcome="timeout-deny")
             # The user was not there. That is not a refusal, and the agent must not treat it as one — a refusal
             # means "do not go this way", an absence means "carry on without this". Saying which keeps the agent
             # from either giving up entirely or hammering the same door.
@@ -98,24 +109,33 @@ class ApprovalBroker:
         decision = (decision or "").strip().lower()
         scope = (scope or ONCE).strip().lower()
         if decision not in (ALLOW, DENY):
-            raise ValueError("decision must be 'allow' or 'deny'")
+            exc = ValueError("decision must be 'allow' or 'deny'")
+            _refusal(exc, channel="approvals", id=rid, rule="bad-decision", decision=decision)
+            raise exc
         if scope not in SCOPES:
-            raise ValueError(f"scope must be one of {', '.join(SCOPES)}")
+            exc = ValueError(f"scope must be one of {', '.join(SCOPES)}")
+            _refusal(exc, channel="approvals", id=rid, rule="bad-scope", scope=scope)
+            raise exc
         if decision == DENY:
             scope = ONCE                            # a denial is never remembered
         with self._lock:
             row = self._pending.get(rid)
             event = self._events.get(rid)
             if row is None or event is None:
-                raise KeyError(rid)
+                exc = KeyError(rid)
+                _refusal(exc, channel="approvals", id=rid, rule="not-pending", decision=decision)
+                raise exc
             verdict = Decision(decision == ALLOW, scope)
             if verdict.allowed and scope == PERMANENT and self._on_permanent is not None:
                 try:
                     self._on_permanent(row["agent"], row["path"])
-                except Exception:                   # noqa: BLE001 — a failed persist must not lose the answer
-                    pass
+                except Exception as exc:            # noqa: BLE001 — a failed persist must not lose the answer
+                    trace.failure("approval.persist.failed", exc, channel=str(row["agent"]),
+                                  path=str(row["path"]), scope=scope)
             self._decisions[rid] = verdict
         event.set()
+        trace.event("approval.answer", channel=str(row["agent"]), id=rid, path=str(row["path"]),
+                    op=row["op"], decision=decision, scope=scope)
         return {"id": rid, "decision": decision, "scope": scope,
                 "agent": row["agent"], "path": row["path"], "op": row["op"]}
 
@@ -139,6 +159,8 @@ class ApprovalBroker:
             entry = (str(prefix), frozenset(flags or ()))
             if entry not in bucket:
                 bucket.append(entry)
+        trace.event("approval.grant", channel=str(agent), scope=scope, prefix=str(prefix),
+                    flags=", ".join(sorted(flags or ())) or "-")
 
     def covers(self, agent: str, path: str, flag: str) -> bool:
         """Is this path already granted by a session approval?"""
@@ -150,9 +172,13 @@ class ApprovalBroker:
                 continue
             try:
                 target.relative_to(prefix)
+                trace.event("approval.scope", level="debug", channel=str(agent), path=str(target),
+                            flag=flag, allowed=True, rule="session-grant", prefix=str(prefix))
                 return True
             except ValueError:
                 continue
+        trace.event("approval.scope", level="debug", channel=str(agent), path=str(target),
+                    flag=flag, allowed=False, rule="no-grant")
         return False
 
     def forget_session(self, agent: str) -> None:

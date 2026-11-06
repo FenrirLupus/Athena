@@ -61,7 +61,9 @@ with tempfile.TemporaryDirectory() as td:
 
     summary = metrics_mod.summary(root)
     checks["summary_totals"] = summary["total"]["turns"] == 2 and summary["total"]["errors"] == 1
-    checks["summary_by_channel"] = "meter" in summary["channels"]
+    checks["summary_by_channel"] = summary["channels"].get("meter", {}).get("turns") == 2
+    # the key must be the recorded name, not the lane's internal id (that printed a uuid in the CLI table)
+    checks["summary_channel_key_is_named"] = not any("-" in name and len(name) > 32 for name in summary["channels"])
     scoped = metrics_mod.summary(root, channel="meter")
     checks["scoped_summary"] = scoped["total"]["turns"] == 2 and scoped["scope"] == "meter"
 
@@ -76,4 +78,8 @@ with tempfile.TemporaryDirectory() as td:
 
 for name, passed in checks.items():
     print(f"  {'PASS' if passed else 'FAIL'}  {name}")
-print("\nRESULT:", "PASS" if all(checks.values()) else "FAIL")
+_green = all(checks.values())
+print("\nRESULT:", "PASS" if _green else "FAIL")
+# exit code must agree with the printed verdict: a suite that says FAIL and exits 0 is a trap for any
+# runner that trusts the exit code alone.
+sys.exit(0 if _green else 1)

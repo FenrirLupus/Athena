@@ -18,7 +18,7 @@ import hashlib
 import json
 from datetime import datetime, timezone
 from pathlib import Path
-from core import timefmt
+from core import timefmt, trace
 
 MAX_ROWS = 4000
 DEFAULT_LIMIT = 200
@@ -51,14 +51,23 @@ def read_events(security_dir: Path | str, since: float | None = None, limit: int
     """Ledger rows newer than `since`, oldest first, in the documented shape."""
     if limit is None:
         limit = DEFAULT_LIMIT
+    # a refusal is a decision, and it is the one a caller sees: each says which rule bound it
     if not 1 <= int(limit) <= LIMIT_MAX:
+        trace.event("ledger.refused", level="error", channel="ledger", arg="limit", value=limit,
+                    rule=f"1..{LIMIT_MAX}")
         raise ValueError(f"limit must be between 1 and {LIMIT_MAX}")
     if since is not None and since < 0:
+        trace.event("ledger.refused", level="error", channel="ledger", arg="since", value=since,
+                    rule="zero or a unix timestamp")
         raise ValueError("since must be zero or a unix timestamp")
     if within is not None and not 0 < int(within) <= MAX_WINDOW_S:
+        trace.event("ledger.refused", level="error", channel="ledger", arg="within", value=within,
+                    rule=f"1..{MAX_WINDOW_S}s")
         raise ValueError(f"within must be between 1 and {MAX_WINDOW_S} seconds")
     wanted = str(min_level or "info").lower()
     if wanted not in LEVELS:
+        trace.event("ledger.refused", level="error", channel="ledger", arg="min_level", value=wanted,
+                    rule=", ".join(LEVELS))
         raise ValueError(f"min_level must be one of {', '.join(LEVELS)}")
 
     path = Path(security_dir) / "events.jsonl"
@@ -68,46 +77,56 @@ def read_events(security_dir: Path | str, since: float | None = None, limit: int
 
     rows: list[dict] = []
     skipped = 0
-    if path.is_file():
-        try:
-            lines = path.read_text(encoding="utf-8").splitlines()[-MAX_ROWS:]
-        except OSError:
-            lines = []
-        for line in lines:
-            if not line.strip():
-                continue
+    with trace.span("ledger.read", channel="ledger", limit=int(limit), since=since,
+                    within=within, min_level=wanted) as sp:
+        if path.is_file():
             try:
-                raw = json.loads(line)
-            except ValueError:
-                skipped += 1
-                continue
-            if not isinstance(raw, dict):
-                skipped += 1
-                continue
-            at_epoch = float(raw.get("at") or 0)
-            if since is not None and at_epoch <= since:
-                continue
-            if floor is not None and at_epoch < floor:
-                continue
-            level = level_of(raw.get("kind"))
-            if LEVELS.index(level) < LEVELS.index(wanted):
-                continue
-            rows.append({
-                "id": _row_id(raw),
-                "at": _iso(at_epoch),
-                "at_epoch": at_epoch,
-                "level": level,
-                "team": raw.get("team") or "",
-                "kind": raw.get("kind") or "",
-                "path": raw.get("path") or "",
-                "lane": raw.get("lane") or "",
-                "text": raw.get("detail") or raw.get("kind") or "",
-            })
-
-    rows.sort(key=lambda row: row["at_epoch"])
-    truncated = len(rows) > int(limit)
-    rows = rows[-int(limit):]
-    cursor = rows[-1]["at_epoch"] if rows else (since or 0)
+                lines = path.read_text(encoding="utf-8").splitlines()[-MAX_ROWS:]
+            except OSError as exc:
+                # an unreadable ledger answers "no events" — the one failure that must not look quiet
+                trace.failure("ledger.read", exc, channel="ledger", path=str(path))
+                lines = []
+            for index, line in enumerate(lines):
+                if not line.strip():
+                    continue
+                try:
+                    raw = json.loads(line)
+                except ValueError:
+                    skipped += 1
+                    trace.event("ledger.row.skipped", level="trace", channel="ledger", line=index,
+                                reason="not json", chars=len(line))
+                    continue
+                if not isinstance(raw, dict):
+                    skipped += 1
+                    trace.event("ledger.row.skipped", level="trace", channel="ledger", line=index,
+                                reason="not an object", shape=type(raw).__name__)
+                    continue
+                at_epoch = float(raw.get("at") or 0)
+                if since is not None and at_epoch <= since:
+                    continue
+                if floor is not None and at_epoch < floor:
+                    continue
+                level = level_of(raw.get("kind"))
+                if LEVELS.index(level) < LEVELS.index(wanted):
+                    continue
+                rows.append({
+                    "id": _row_id(raw),
+                    "at": _iso(at_epoch),
+                    "at_epoch": at_epoch,
+                    "level": level,
+                    "team": raw.get("team") or "",
+                    "kind": raw.get("kind") or "",
+                    "path": raw.get("path") or "",
+                    "lane": raw.get("lane") or "",
+                    "text": raw.get("detail") or raw.get("kind") or "",
+                })
+        rows.sort(key=lambda row: row["at_epoch"])
+        matched = len(rows)
+        truncated = matched > int(limit)
+        rows = rows[-int(limit):]
+        cursor = rows[-1]["at_epoch"] if rows else (since or 0)
+        sp.ok(rows=len(rows), matched=matched, skipped=skipped, truncated=truncated,
+              exists=path.is_file(), cursor=round(float(cursor), 3))
     return {"cursor": cursor, "truncated": truncated, "rows": rows, "skipped": skipped}
 
 
@@ -117,22 +136,33 @@ def turn_rows(profile_dir: Path | str, limit: int = DEFAULT_LIMIT) -> list[dict]
         raise ValueError(f"limit must be between 1 and {LIMIT_MAX}")
     path = Path(profile_dir) / "metrics" / "turns.jsonl"
     if not path.is_file():
+        trace.event("ledger.turns", level="trace", channel="ledger", lane=Path(profile_dir).name,
+                    exists=False, rows=0)
         return []
     rows: list[dict] = []
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines()[-MAX_ROWS:]
-    except OSError:
-        return []
-    for line in lines:
-        if not line.strip():
-            continue
+    skipped = 0
+    with trace.span("ledger.turns", channel="ledger", lane=Path(profile_dir).name,
+                    limit=int(limit)) as sp:
         try:
-            row = json.loads(line)
-        except ValueError:
-            continue
-        if isinstance(row, dict):
-            rows.append(row)
-    return rows[-int(limit):]
+            lines = path.read_text(encoding="utf-8").splitlines()[-MAX_ROWS:]
+        except OSError as exc:
+            trace.failure("ledger.turns", exc, channel="ledger", path=str(path))
+            lines = []
+        for index, line in enumerate(lines):
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+            except ValueError:
+                skipped += 1
+                trace.event("ledger.row.skipped", level="trace", channel="ledger", line=index,
+                            source="turns", reason="not json", chars=len(line))
+                continue
+            if isinstance(row, dict):
+                rows.append(row)
+        rows = rows[-int(limit):]
+        sp.ok(rows=len(rows), skipped=skipped)
+    return rows
 
 
 def timeline(events: list[dict], turns: list[dict], limit: int = DEFAULT_LIMIT) -> list[dict]:
@@ -148,4 +178,10 @@ def timeline(events: list[dict], turns: list[dict], limit: int = DEFAULT_LIMIT) 
     merged = [{"source": "ledger", "at_epoch": float(row.get("at_epoch") or 0), **row} for row in events]
     merged += [{"source": "turn", "at_epoch": epoch(row.get("ts")), **row} for row in turns]
     merged.sort(key=lambda row: row["at_epoch"])
-    return merged[-max(1, int(limit)):]
+    # rows with no parseable timestamp fold to 0 and sort to the front, where the window cuts them: the
+    # count is the only sign that they were dropped instead of old
+    undated = sum(1 for row in merged if not row["at_epoch"])
+    merged = merged[-max(1, int(limit)):]
+    trace.event("ledger.fold", level="debug", channel="ledger", events=len(events), turns=len(turns),
+                merged=len(merged), limit=int(limit), undated=undated)
+    return merged

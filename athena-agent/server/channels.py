@@ -15,6 +15,7 @@ from pathlib import Path
 from context import stack as stack_mod
 from core import agentconfig
 from core import context_window as _window_mod
+from core import trace
 
 
 def _effective_window(model_cfg: dict) -> int:
@@ -170,6 +171,8 @@ class ChannelManager:
         configured = bool(model_cfg.get("name") or model_cfg.get("base_url")
                           or agentconfig.local_model_name(model_cfg))
         if not configured:
+            trace.event("provider.fallback", level="debug", channel=name, reason="no model block of its own",
+                        inherited=str(getattr(self.provider, "name", "") or "global"))
             return self.provider                 # inherits the global provider; nothing cached
 
         from providers import base as provider_base
@@ -180,7 +183,11 @@ class ChannelManager:
             model_block = agent_cfg.get("model") or {}
             key_name = str(model_block.get("key_name") or agent_cfg.get("api_key") or "")
             provider = provider_base.build(cfg, key_name=key_name, root=root)
-        except Exception:                        # a broken config.yaml must not take the channel down
+        except Exception as exc:                 # a broken config.yaml must not take the channel down
+            # silent substitution is the bug: the channel answers from the global provider while its own file says
+            # otherwise, so the ✗ names both the lane and the adapter it actually uses
+            trace.failure("provider.fallback", exc, channel=name, reason="the model block would not build",
+                          inherited=str(getattr(self.provider, "name", "") or "global"))
             return self.provider
         self._providers[name] = provider
         return provider
@@ -265,10 +272,11 @@ class ChannelManager:
         if before == state:
             return
         if not channelstate.can_move(before, state):
-            print(f"state: refusing {channel.name} {before} -> {state}", file=__import__("sys").stderr)
+            trace.event("state.refused", level="error", channel=channel.name, was=before, to=state)
             return
         channel.state = state
         channelstate.write(channel.root, state, **extra)
+        trace.event("state.change", level="debug", channel=channel.name, was=before, to=state, **extra)
 
     # -- admission (server/admission.py) -----------------------------------
     def _notice_if_busy(self, channel: Channel, text: str, author: str = "") -> None:
@@ -320,12 +328,14 @@ lane cannot fabricate a profile. Creation is `create()`."""
             channel = Channel(name=name, root=root, session=Session(name, root), state=adopted,
                               agent_id=str(record.get("id") or ""))
             if recovered_from:
-                print(f"state: {name} recovered {recovered_from} -> {adopted} "
-                      f"(the process that wrote it is gone)", file=__import__("sys").stderr)
+                trace.event("state.recover", channel=name, was=recovered_from, now=adopted,
+                            note="the process that wrote it is gone")
             channel.thread = threading.Thread(target=self._worker, args=(channel,),
                                            name=f"channel-{name}", daemon=True)
             channel.thread.start()
             self.channels[name] = channel
+            trace.event("worker.start", level="debug", channel=name, worker=f"channel-{name}",
+                        state=adopted, agent_id=str(record.get("id") or ""))
             return channel
 
     def _worker(self, channel: Channel) -> None:
@@ -346,12 +356,22 @@ lane cannot fabricate a profile. Creation is `create()`."""
         return self.router.instructions_for(channel)
 
     def _do_turn(self, channel: Channel, job: dict) -> None:
+        # one job is one lane: everything the turn, its routing and its metrics call inherits it, so a helper
+        # that cannot be given a channel (a durable write, a config read) still lands in this channel's trail
+        with trace.lane_scope(channel.name):
+            return self._do_turn_inner(channel, job)
+
+    def _do_turn_inner(self, channel: Channel, job: dict) -> None:
         self.refresh_config()                         # a plugin enabled since boot becomes visible here
+        # a message from another agent is not the operator speaking — the prompt says who it is from
+        author = job.get("author") or ""
+        mode = job.get("mode") or "chat"
+        queued_behind = channel.queue.qsize() + channel.call_queue.qsize()
         # admission: a turn starts only from idle/queued — anything else means something else is
         # already working this channel, and starting a second would corrupt its transcript
         if channel.state not in (channelstate.IDLE, channelstate.QUEUED):
-            print(f"admission: {channel.name} is {channel.state}; refusing to start a turn",
-                  file=__import__("sys").stderr)
+            trace.event("admission.refused", level="error", channel=channel.name, state=channel.state,
+                        author=author, mode=mode)
             return
         channel.busy = True
         # inbound: the message being handled came from someone else — the right-hand indicator names them
@@ -359,6 +379,9 @@ lane cannot fabricate a profile. Creation is `create()`."""
         channel.current_turn = channel.turns + 1
         with channel._lock:
             channel.inbox = [item for item in channel.inbox if item.get("turn") == channel.current_turn]
+        trace.event("job.received", channel=channel.name, turn=channel.current_turn,
+                    author=author or "operator", mode=mode, queue_depth=queued_behind,
+                    wait_ms=round(max(0.0, time.time() - float(job.get("queued_at") or time.time())) * 1000))
         self.set_state(channel, channelstate.WORKING, turn=channel.current_turn)
         turn_started = time.time()
         # this agent's config.yaml first, the global one filling the blanks — the same rule the provider and the
@@ -371,10 +394,8 @@ lane cannot fabricate a profile. Creation is `create()`."""
                 max_usd=float(turn_budget.get("max_turn_usd") or 0.50),
                 grace_calls=int(turn_budget.get("grace_calls") or 1),
             )
-            # a message from another agent is not the operator speaking — the prompt says who it is from
-            author = job.get("author") or ""
             # both modes write into the same transcript; the marker is what tells them apart afterwards
-            marker = "[Voice]" if (job.get("mode") or "chat") == "call" else "[Message]"
+            marker = "[Voice]" if mode == "call" else "[Message]"
             spoken = f"{marker} {job['text']}"
             user_text = f"[from @{author}] {spoken}" if author else spoken
             result = run_turn(
@@ -389,7 +410,7 @@ lane cannot fabricate a profile. Creation is `create()`."""
                 user_text=user_text,
                 cfg=turn_cfg,
                 budget=budget,
-                mode=job.get("mode") or "chat",
+                mode=mode,
                 interrupts=lambda: self._drain(channel),
             )
             with channel._lock:
@@ -399,6 +420,7 @@ lane cannot fabricate a profile. Creation is `create()`."""
                 channel.last_author = author
             self._route(channel, result, job)
         except Exception as exc:                       # noqa: BLE001 — a channel must not die
+            trace.failure("channel.error", exc, channel=channel.name, turn=channel.current_turn)
             with channel._lock:
                 channel.last_result = {"channel": channel.name, "status": "error_channel",
                                     "reply": f"channel error: {exc}",
@@ -410,6 +432,18 @@ lane cannot fabricate a profile. Creation is `create()`."""
             channel.busy = False
             channel.last_seen = time.time()
             channel.inbound_from = ""
+            # the outbound half of the turn: what it answered, how long it took, and whether it failed
+            last = channel.last_result or {}
+            status = str(last.get("status") or "")
+            trace.event("turn.closed", channel=channel.name, turn=channel.current_turn,
+                        status=status or "unknown", seconds=round(time.time() - turn_started, 3),
+                        reply_chars=len(str(last.get("reply") or "")),
+                        calls=len(last.get("model_calls") or []))
+            if status == "error_api":
+                # loop.py caught the provider's exception and turned it into a status, so there is no
+                # exception object here — the frame is the reply it built, still read as a trail entry
+                trace.failure("channel.error_api", None, channel=channel.name, turn=channel.current_turn,
+                              error=str(last.get("reply") or "")[:300])
             # more work waiting means queued, otherwise the channel is idle or in error
             pending = channel.queue.qsize()
             failed = str((channel.last_result or {}).get("status") or "").startswith("error")
@@ -467,7 +501,7 @@ lane cannot fabricate a profile. Creation is `create()`."""
                 # evidence that the cap is too low. Without it, C1 can only be argued, not measured.
                 "finish_reasons": [c.get("finish_reason") or "" for c in (result.get("model_calls") or [])],
                 "tool_rounds": int(result.get("tool_rounds") or 0),
-                "tool_names": [c.get("name") for c in (result.get("tool_calls") or []) if isinstance(c, dict)],
+                "tool_names": list(result.get("tool_names") or []),
                 "cost_usd": round(total_tokens / 1_000_000 * rate, 6),
                 "usd_per_mtok": rate,
                 "local_resources": (metrics_mod.sample_resources(described.get("model") or "")
@@ -487,7 +521,7 @@ lane cannot fabricate a profile. Creation is `create()`."""
                          else (result.get("reply") or "")[:300],
             })
         except Exception as exc:                       # noqa: BLE001 — measurement must never break a turn
-            print(f"metrics: could not record turn for {channel.name}: {exc}", file=__import__("sys").stderr)
+            trace.failure("metrics.record", exc, channel=channel.name, turn=channel.current_turn)
 
     # -- agent to agent ----------------------------------------------------
     def profiles(self) -> list[str]:
@@ -505,11 +539,27 @@ lane cannot fabricate a profile. Creation is `create()`."""
     def enqueue(self, name: str, text: str, *, author: str = "", hops: int = 0,
                 reply_to: str | None = None) -> dict:
         """Queue a turn without waiting — see Admission.enqueue."""
-        return self.admission.enqueue(name, text, author=author, hops=hops, reply_to=reply_to)
+        try:
+            result = self.admission.enqueue(name, text, author=author, hops=hops, reply_to=reply_to)
+        except Exception as exc:
+            # a refusal (full queue, asleep lane) is a trail entry too: the message never became a turn
+            trace.failure("job.rejected", exc, channel=name, author=author or "operator",
+                          mode="chat", hops=hops)
+            raise
+        trace.event("job.queued", level="debug", channel=name, author=author or "operator",
+                    mode="chat", hops=hops, queue_depth=result.get("queue_depth"), chars=len(text))
+        return result
 
     def submit(self, name: str, text: str, wait_s: float = 120.0, mode: str = "chat") -> dict:
         """Queue a turn and wait for this job — see Admission.submit."""
-        return self.admission.submit(name, text, wait_s=wait_s, mode=mode)
+        try:
+            result = self.admission.submit(name, text, wait_s=wait_s, mode=mode)
+        except Exception as exc:
+            trace.failure("job.rejected", exc, channel=name, author="operator", mode=mode)
+            raise
+        trace.event("job.submitted", level="debug", channel=name, author="operator", mode=mode,
+                    status=result.get("status"), wait_s=wait_s, chars=len(text))
+        return result
 
     def ensure_awake(self, channel: Channel) -> None:
         """Delivery wakes a sleeping channel — see ChannelLifecycle.ensure_awake."""

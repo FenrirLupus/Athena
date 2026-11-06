@@ -55,6 +55,7 @@ from pathlib import Path
 
 from tools.registry import Tool
 from core import frontmatter
+from core import trace
 
 LEGACY_ENTRIES = ("scripts/plugin.py", "plugin.py")
 
@@ -70,14 +71,13 @@ class PluginError(RuntimeError):
 _CRITICAL_MODULES = (
     "core.paths",
     "core.approvals",
-    "core.library",
     "core.secrets",
     "tools.registry",
+    "tools.loader",
     "tools.filesystem",
     "tools.terminal",
     "tools.library",
     "tools.skills",
-    "tools.system",
 )
 _CRITICAL_CLASSES = (
     ("core.paths", "Scope"),
@@ -297,6 +297,19 @@ def enabled_names(cfg: dict) -> list[str]:
     return [str(n).strip() for n in listed if str(n).strip()]
 
 
+def _child_frame(frames: list) -> str:
+    """The innermost `File "...", line N, in f` from a child's traceback, said the way the parent says a frame."""
+    for raw in reversed([str(f) for f in frames]):
+        text = raw.strip()
+        if not text.startswith("File \""):
+            continue
+        parts = text.split('"')
+        location = Path(parts[1]).name if len(parts) > 1 and parts[1] else "?"
+        tail = (parts[2] if len(parts) > 2 else "").strip(", ")
+        return f"{location}:{tail}" if tail else location
+    return "?"
+
+
 class Child:
     """One plugin process. Reads a JSON line per call, with a deadline — a hung plugin must not hang the turn."""
 
@@ -304,9 +317,35 @@ class Child:
         import subprocess
 
         self.timeout = float(timeout)
+        self.entry = Path(argv[-1]).name if argv else "?"
         self.proc = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                      stderr=subprocess.PIPE, text=True, bufsize=1)
         self.specs: list[dict] = []
+        if trace.enabled("debug"):
+            self._drain_stderr()
+
+    def _drain_stderr(self) -> None:
+        """A child writing to a pipe nobody reads blocks once it fills — at debug, its lines become trace lines.
+
+        Nothing else consumes the child's stderr, and an instrumented child emits there, so the pipe would otherwise
+        be a buffer that fills and a plugin that mysteriously stops answering. Bounded: the first 200 lines, cut short.
+        """
+        import threading
+
+        def pump() -> None:
+            for _ in range(200):
+                try:
+                    line = self.proc.stderr.readline()
+                except (OSError, ValueError):
+                    return
+                if not line:
+                    return
+                text = line.strip()
+                if text.startswith("[trace"):          # the child's own header; this line gets the parent's stamp
+                    text = text.split("]", 1)[-1].strip()
+                trace.event("plugin.stderr", level="debug", entry=self.entry, line=text[:200])
+
+        threading.Thread(target=pump, daemon=True, name=f"plugin-stderr-{self.entry}").start()
 
     def _readline(self) -> dict:
         import select
@@ -323,6 +362,12 @@ class Child:
     def handshake(self) -> list[dict]:
         first = self._readline()
         if not first.get("ok"):
+            # The child sent its own last frames; the useful one is the innermost, which names the plugin line that
+            # raised. It is the reason this plugin contributed nothing, so it belongs in the trail.
+            frames = first.get("trace") or []
+            raised = _child_frame(frames)
+            trace.event("plugin.import", level="error", entry=self.entry, frame=raised,
+                        why=str(first.get("error") or "plugin failed to load")[:200])
             raise PluginError(first.get("error") or "plugin failed to load")
         self.specs = first.get("tools") or []
         return self.specs
@@ -374,32 +419,36 @@ def _load_out_of_process(name: str, info: dict, registry, athena_root) -> dict:
     """Start (or reuse) the plugin's process and register proxy tools that talk to it."""
     entry = Path(info["entry"])
     key = f"{name}:{entry}:{int(entry.stat().st_mtime)}"
-    child = _CHILDREN.get(key)
-    if child is None:
-        # The key carries the entry's mtime, so an edit or a reinstall produces a new key; the previous child is closed
-        # rather than left running under the server.
-        for stale in [k for k in list(_CHILDREN) if k.split(":", 1)[0] == name and k != key]:
-            try:
-                _CHILDREN.pop(stale).close()
-            except Exception:                        # noqa: BLE001 — a dead child must not block the new one
-                pass
-        child = Child(_sandbox_argv(entry, athena_root))
-        child.handshake()
-        _CHILDREN[key] = child
-    added = []
-    for spec in child.specs:
-        def make(spec=spec):
-            def call(**kwargs):
-                return child.call(spec["name"], kwargs)
-            return call
+    added: list[str] = []
+    with trace.span("plugins.start", level="debug", plugin=name, entry=entry.name, isolation="process") as sp:
+        child = _CHILDREN.get(key)
+        if child is None:
+            # The key carries the entry's mtime, so an edit or a reinstall produces a new key; the previous child is
+            # closed rather than left running under the server.
+            for stale in [k for k in list(_CHILDREN) if k.split(":", 1)[0] == name and k != key]:
+                try:
+                    _CHILDREN.pop(stale).close()
+                except Exception:                    # noqa: BLE001 — a dead child must not block the new one
+                    pass
+            child = Child(_sandbox_argv(entry, athena_root))
+            child.handshake()
+            _CHILDREN[key] = child
+        for spec in child.specs:
+            def make(spec=spec):
+                def call(**kwargs):
+                    return child.call(spec["name"], kwargs)
+                return call
 
-        try:
-            registry.register(Tool(name=spec["name"], description=spec.get("description") or "",
-                                   parameters=spec.get("parameters") or {"type": "object", "properties": {}},
-                                   fn=make()))
-            added.append(spec["name"])
-        except Exception:                             # noqa: BLE001 — a name clash is the parent's, not the child's
-            continue
+            try:
+                registry.register(Tool(name=spec["name"], description=spec.get("description") or "",
+                                       parameters=spec.get("parameters") or {"type": "object", "properties": {}},
+                                       fn=make()))
+                added.append(spec["name"])
+            except Exception:                         # noqa: BLE001 — a name clash is the parent's, not the child's
+                trace.event("plugins.tool_skipped", level="debug", plugin=name, tool=spec.get("name", "?"),
+                            why="a tool of that name is already registered")
+                continue
+        sp.ok(tools=len(added), declared=len(child.specs))
     return {"name": name, "tools": added, "origin": info["origin"], "entry": str(entry),
             "isolation": "process"}
 
@@ -471,9 +520,15 @@ def load_all(cfg: dict, registry, profile_root=None, athena_root=None, lane_cfg=
         _record(athena_root, "plugin-not-permitted",
                 f"{name} is not in the global plugins.enabled ceiling, so this lane may not run it",
                 path=str(profile_root or ""), lane=lane, agent_id=agent_id)
+        trace.event("plugins.blocked", level="debug", channel=lane or "-", plugin=name, rule="ceiling",
+                    why="not in the global plugins.enabled ceiling, so this lane may not run it")
     if malformed:
         _record(athena_root, "plugin-block-malformed", malformed,
                 path=str(profile_root or ""), lane=lane, agent_id=agent_id)
+        trace.event("plugins.blocked", level="error", channel=lane or "-", rule="malformed",
+                    why=malformed)
+    trace.event("plugins.lane", level="debug", channel=lane or "-", enabled=len(want),
+                blocked=blocked, malformed=bool(malformed))
     if not want:
         return report
     found = {p["name"]: p for p in discover(profile_root, athena_root)}
@@ -483,6 +538,9 @@ def load_all(cfg: dict, registry, profile_root=None, athena_root=None, lane_cfg=
         info = found.get(name)
         if info is None or not info["has_entry"]:
             report["missing"].append(name)
+            trace.event("plugins.missing", level="debug", channel=lane or "-", plugin=name,
+                        why="no folder with a runnable entry script" if info is None
+                        else "the folder has no entry script")
             continue
         isolation = str(((cfg or {}).get("plugins") or {}).get("isolation") or "process").lower()
         before_tools = set(registry.names())
@@ -495,12 +553,16 @@ def load_all(cfg: dict, registry, profile_root=None, athena_root=None, lane_cfg=
                 "error": "not an additive plugin: " + "; ".join(violations),
                 "violation": violations})
             _record(athena_root, "plugin-rejected", f"not additive: {'; '.join(violations)}", info["entry"])
+            trace.event("plugins.skipped", level="error", channel=lane or "-", plugin=name, rule="additive",
+                        why="; ".join(violations))
             continue
         if info.get("skills_only"):
             skills_dir = Path(info["dir"]) / "skills"
             found = sorted(p.parent.name for p in skills_dir.glob("*/SKILL.md")) if skills_dir.is_dir() else []
             report["loaded"].append({"name": name, "tools": [], "origin": info["origin"], "entry": "",
                                      "isolation": "none (skills bundle)", "skills": found})
+            trace.event("plugins.loaded", level="debug", channel=lane or "-", plugin=name, tools=0,
+                        isolation="none", why="skills bundle: prose only, nothing to execute")
             continue
 
         if isolation == "process":
@@ -508,7 +570,7 @@ def load_all(cfg: dict, registry, profile_root=None, athena_root=None, lane_cfg=
                 report["loaded"].append(_load_out_of_process(name, info, registry, athena_root))
             except Exception as exc:                  # noqa: BLE001 — a plugin that will not start is skipped
                 report["skipped"].append({"name": name, "error": f"{type(exc).__name__}: {exc}"})
-            continue
+            continue      # the span in _load_out_of_process already logged why, with the frame
 
         try:
             spec = importlib.util.spec_from_file_location(f"athena_plugin_{name}", info["entry"])
@@ -519,6 +581,8 @@ def load_all(cfg: dict, registry, profile_root=None, athena_root=None, lane_cfg=
                 raise PluginError(f"{Path(info['entry']).name} has no register(registry, ctx)")
             before = set(registry.names())
             register(registry, ctx)
+            trace.event("plugins.register", level="debug", channel=lane or "-", plugin=name,
+                        isolation="inprocess", tools=len(set(registry.names()) - before))
 
             # additive, not overriding: anything the plugin rebound is put back before its tools are kept
             tampered = _restore(baseline)
@@ -530,6 +594,9 @@ def load_all(cfg: dict, registry, profile_root=None, athena_root=None, lane_cfg=
                     "error": f"tampered with the system layer: {', '.join(tampered)} — restored, plugin rejected",
                     "violation": tampered})
                 _record(athena_root, "plugin-tampered", ", ".join(tampered), info["entry"])
+                trace.event("plugins.skipped", level="error", channel=lane or "-", plugin=name, rule="additive",
+                            why=f"rebound {len(tampered)} name(s) in the system layer; restored and rejected",
+                            names=tampered[:12])
                 continue
 
             # a patch two levels down evades identity checks; run the guard and see if it still refuses
@@ -542,14 +609,32 @@ def load_all(cfg: dict, registry, profile_root=None, athena_root=None, lane_cfg=
                     "error": "weakened the guard: " + "; ".join(problems),
                     "violation": problems})
                 _record(athena_root, "plugin-weakened-guard", "; ".join(problems), info["entry"])
+                trace.event("plugins.skipped", level="error", channel=lane or "-", plugin=name, rule="guard",
+                            why="; ".join(problems))
                 continue
 
             added = sorted(set(registry.names()) - before)
             report["loaded"].append({"name": name, "tools": added, "origin": info["origin"],
                                      "entry": info["entry"]})
+            trace.event("plugins.loaded", level="debug", channel=lane or "-", plugin=name, tools=len(added),
+                        isolation="inprocess", origin=info["origin"])
         except Exception as exc:                      # noqa: BLE001 — a bad plugin must not stop the server
             for tool_name in set(registry.names()) - before_tools:
                 registry.discard(tool_name)
             report["skipped"].append({"name": name, "error": f"{type(exc).__name__}: {exc}",
                                       "trace": traceback.format_exc(limit=3).splitlines()[-3:]})
+            trace.failure("plugins.skipped", exc, channel=lane or "-", plugin=name, rule="load",
+                          isolation="inprocess")
+    # a plugin is loaded with its documents, the same rule a skill and a tool follow: PLUGIN.md points at references/
+    # and those arrive with the load rather than behind a second call an agent has to remember
+    from core import references as references_mod
+
+    for row in report["loaded"]:
+        folder = (found.get(row["name"]) or {}).get("dir")
+        if not folder:
+            continue
+        attached = references_mod.attach(folder, (found.get(row["name"]) or {}).get("meta") or {})
+        row["references"] = {"attached": attached["attached"], "omitted": attached["omitted"],
+                             "bytes": attached["bytes"], "problems": attached["problems"],
+                             "text": attached["text"]}
     return report

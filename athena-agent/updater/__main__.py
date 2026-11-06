@@ -16,8 +16,10 @@ from pathlib import Path
 
 from . import channels, wizard
 from core.root import athena_root
+from core import trace
 
 DEFAULT_ROOT = athena_root()
+LANE = "updater"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -80,12 +82,16 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     except wizard.WizardError as exc:
         message = str(exc)
+        code = 3 if "rolled back" in message.lower() else 2
+        trace.event("updater.exit", channel=LANE, code=code, reason=message[:200])
         print(f"refused: {message}" if "refused" not in message.lower() else message, file=sys.stderr)
-        return 3 if "rolled back" in message.lower() else 2
+        return code
     except channels.ChannelError as exc:
+        trace.event("updater.exit", channel=LANE, code=2, reason=f"ChannelError: {exc}"[:200])
         print(f"refused: {exc}", file=sys.stderr)
         return 2
     except KeyboardInterrupt:
+        trace.event("updater.exit", channel=LANE, code=2, reason="cancelled")
         print("cancelled", file=sys.stderr)
         return 2
 

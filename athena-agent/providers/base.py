@@ -15,15 +15,44 @@ why running a downloaded model is exactly the same thing as using a custom URL.
 """
 from __future__ import annotations
 
+import contextvars
 import os
+from contextlib import contextmanager
 from pathlib import Path
+from urllib.parse import urlparse
+
 from core.root import athena_root
 from core import durable
+from core import trace
 
 
 # Credential sidecar (core/credproxy.py). Empty means "sign requests here"; set at boot when the sidecar runs, in
 # which case the adapter sends no Authorization at all and the proxy adds one on the other side.
 PROXY: dict = {"url": "", "token": ""}
+
+
+# Which lane and turn a provider call belongs to. The turn loop binds this around each call so an adapter's own
+# line carries the same `channel#turn` prefix as the loop's → / ← pair — without every adapter signature growing
+# a tracing argument it would have to thread through, and without an adapter having to know what a turn is.
+_TRACE_SCOPE: contextvars.ContextVar = contextvars.ContextVar("athena_provider_trace", default={})
+
+
+@contextmanager
+def trace_scope(**fields):
+    """Bind `channel`/`turn` to every trace line emitted inside this block (a context var, so it crosses threads)."""
+    token = _TRACE_SCOPE.set({k: v for k, v in fields.items() if v is not None})
+    try:
+        # the same fields, handed to the emitter: an adapter's own helpers inherit the lane, not just the adapter's
+        # explicit `**scope_fields()` lines — one binding, two readers
+        with trace.lane_scope(str(fields.get("channel") or ""), turn=fields.get("turn")):
+            yield
+    finally:
+        _TRACE_SCOPE.reset(token)
+
+
+def scope_fields() -> dict:
+    """The bound channel/turn, for an adapter line: `trace.event(..., **scope_fields(), port=p)`."""
+    return dict(_TRACE_SCOPE.get())
 
 
 class ProviderError(RuntimeError):
@@ -117,7 +146,6 @@ def secret_name(provider: str, base_url: str = "") -> str:
     """
     host = ""
     try:
-        from urllib.parse import urlparse
         host = (urlparse(base_url or "").hostname or "").lower()
     except ValueError:
         host = ""
@@ -214,6 +242,9 @@ def api_key(kind: str, name: str = "", root=None) -> str:
         val = os.environ.get(env)
         if val and val.strip():
             return val.strip()
+    # no key anywhere: the adapter will refuse the call, and this line is the only one that says where it looked
+    trace.event("provider.key.missing", level="debug", kind=kind, name=(name or "-"),
+                files=len(roots), env_tried=len(ENV_NAMES.get(kind, ("ATHENA_API_KEY",))))
     return ""
 
 
@@ -230,18 +261,36 @@ def build(cfg: dict, key_name: str = "", root=None) -> BaseProvider:
     model = cfg.get("model") or {}
     kind = (model.get("provider") or "mock").lower()
     local = model.get("local") or {}
+    model_name = str(model.get("name") or "")
+    endpoint = ""
+    try:
+        endpoint = (urlparse(str(model.get("base_url") or "")).hostname or "")
+    except ValueError:
+        endpoint = ""
+
+    def _chosen(adapter: str, reason: str) -> None:
+        """One line per selection: which adapter, for which model, and the rule that picked it.
+
+        A provider that was silently inherited (or silently replaced because it would not build) is the shape of
+        bug this exists for — the channel's own `provider.fallback` says when that happens.
+        """
+        trace.event("provider.select", level="debug", chosen=adapter, kind=kind, model=model_name or "-",
+                    endpoint=endpoint or "-", reason=reason)
 
     # local wins over `provider`: enabling it is an explicit statement about where answers come from, and
     # a config that says `provider: mock, local.enabled: true` must not quietly keep answering from the mock
     if local.get("enabled"):
+        _chosen("local", "local.enabled")
         from providers.local import LocalProvider
         return LocalProvider(cfg)
 
     if kind == "mock":
+        _chosen("mock", "provider=mock")
         from providers.mock import MockProvider
         return MockProvider(model_name=str(model.get("name") or "mock-1"))
 
     if kind in ("openai", "deepseek", "lmstudio", "llamacpp", "ollama", "vllm", "custom"):
+        _chosen("openai", f"provider={kind}")
         from providers.openai_compat import OpenAICompatProvider
         return OpenAICompatProvider(
             base_url=str(model.get("base_url") or ""),
@@ -251,6 +300,7 @@ def build(cfg: dict, key_name: str = "", root=None) -> BaseProvider:
         )
 
     if kind in ("anthropic", "claude"):
+        _chosen("anthropic", f"provider={kind}")
         from providers.anthropic import AnthropicProvider
         return AnthropicProvider(
             base_url=str(model.get("base_url") or "https://api.anthropic.com"),
@@ -259,4 +309,7 @@ def build(cfg: dict, key_name: str = "", root=None) -> BaseProvider:
             secret_root=root,
         )
 
+    # a refusal is a `✗`, not a `·`: this build produced no provider, and the frame that decided is recorded
+    trace.failure("provider.refused", None, kind=kind, model=model_name or "-",
+                  reason="unknown provider", known="openai, anthropic, mock")
     raise ProviderError(f"unknown provider: {kind} (expected openai, anthropic or mock)")

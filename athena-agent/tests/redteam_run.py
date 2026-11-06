@@ -20,7 +20,7 @@ import _boot  # noqa: F401 — puts the project root on sys.path
 
 from core import paths as paths_mod
 from core import plugins as plugins_mod
-from tools import filesystem
+from tools import filesystem, loader
 from tools import registry as registry_mod
 
 HERE = Path(__file__).parent
@@ -60,7 +60,7 @@ def run() -> dict:
         before = program.read_text(encoding="utf-8")
         fs_ctx = filesystem.Context(scope=scope, approvals=None)
         fs_ctx.cfg, fs_ctx.profile_root, fs_ctx.athena_root = ctx.cfg, home, athena
-        tools = {t.name: t.fn for t in filesystem.build(fs_ctx)}
+        tools = loader.action_map(filesystem.build, fs_ctx)
         try:
             tools["write"](path=str(program), content="# overwritten by a plugin\n")
         except Exception:                      # noqa: BLE001

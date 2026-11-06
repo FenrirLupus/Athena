@@ -26,6 +26,7 @@ import uuid
 from pathlib import Path
 from core import timefmt
 from core import durable
+from core import trace
 
 IDENTITY = "identity.json"
 LABEL_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
@@ -102,13 +103,18 @@ def read(root):
     except FileNotFoundError:
         return None
     except OSError as exc:
+        trace.failure("identity.read.failed", exc, channel=Path(root).name, path=str(path))
         raise IdentityInvalid(f"{path} cannot be read ({exc.strerror or exc})") from exc
     try:
         record = json.loads(text)
     except json.JSONDecodeError as exc:
+        trace.failure("identity.invalid", None, channel=Path(root).name, path=str(path),
+                      rule="not-json", error=f"JSONDecodeError: {exc.msg}")
         raise IdentityInvalid(f"{path} is not valid JSON ({exc.msg}) — mint one with "
                               f"`./athena-agent/athena.sh identity --adopt {Path(root).name}`") from exc
     if not _valid(record):
+        trace.failure("identity.invalid", None, channel=Path(root).name, path=str(path),
+                      rule="no-usable-id", error="record has no UUID in `id`")
         raise IdentityInvalid(f"{path} has no usable id — mint one with "
                               f"`./athena-agent/athena.sh identity --adopt {Path(root).name}`")
     if not isinstance(record.get("aliases"), list):
@@ -146,6 +152,8 @@ def _write(root, record: dict) -> Path:
 def mint(root, *, minted_by: str = "create") -> dict:
     """Write a fresh identity into a directory that has none. Refuses to overwrite."""
     if minted_by not in MINTED_BY:
+        trace.event("identity.refused", level="error", channel=Path(root).name, rule="minted-by",
+                    minted_by=minted_by, allowed=list(MINTED_BY))
         raise ValueError(f"minted_by must be one of {', '.join(MINTED_BY)}")
     try:
         existing = read(root)
@@ -154,11 +162,17 @@ def mint(root, *, minted_by: str = "create") -> dict:
         # still refuses, because overwriting a valid id is how attribution is lost.
         if minted_by != "adopt":
             raise
+        trace.event("identity.repair", level="info", channel=Path(root).name,
+                    rule="adopt-replaces-unusable-file")
         existing = None
     if existing is not None:
+        trace.event("identity.refused", level="error", channel=Path(root).name, rule="exists",
+                    minted_by=minted_by)
         raise IdentityExists(f"{Path(root) / IDENTITY} already exists — refusing to overwrite an id")
     record = {"id": str(uuid.uuid4()), "created": _now(), "minted_by": minted_by, "aliases": []}
     _write(root, record)
+    trace.event("identity.mint", level="info", channel=Path(root).name, id=record["id"],
+                minted_by=minted_by)
     return record
 
 
@@ -175,6 +189,8 @@ def remint(root, *, split_from: str = "") -> dict:
     if split_from:
         record["split_from"] = split_from
     _write(root, record)
+    trace.event("identity.remint", level="info", channel=Path(root).name, id=record["id"],
+                split_from=split_from or "", aliases="cleared")
     return record
 
 
@@ -236,6 +252,7 @@ def resolve(profiles, ref) -> dict:
     """
     text = str(ref or "").strip()
     if not text:
+        trace.event("identity.refused", level="error", rule="empty-ref")
         raise UnknownAgent("a lane ref is required")
     entries = _entries(profiles)
 
@@ -243,27 +260,38 @@ def resolve(profiles, ref) -> dict:
         wanted = text[len(ID_PREFIX):].strip()
         matches = [entry for entry in entries if entry["id"] == wanted]
         if not matches:
+            trace.event("identity.refused", level="error", rule="unknown-id", ref=wanted)
             raise UnknownAgent(f"no lane has the id {wanted} — known lanes: {_candidates(profiles)}")
         if len(matches) > 1:
+            labels = sorted(m["label"] for m in matches)
+            trace.event("identity.refused", level="error", rule="duplicate-id", ref=wanted,
+                        lanes=labels)
             raise IdentityDuplicate(
                 f"id {wanted} is shared by {', '.join(sorted(m['label'] for m in matches))} — a copied directory. "
                 f"Separate one with `identity --break-duplicate <label>`")
         chosen = matches[0]
+        trace.event("identity.resolve", level="debug", channel=chosen["label"], by="id", ref=wanted)
         return {**_public(chosen), "root": chosen["root"]}
 
     # a label wins over an alias of the same spelling: the directory is the thing that exists
     by_label = [entry for entry in entries if entry["label"] == text]
     if by_label:
         chosen = by_label[0]
+        shadowed = [entry["label"] for entry in entries if text in entry["aliases"]]
+        trace.event("identity.resolve", level="debug", channel=chosen["label"], by="label", ref=text,
+                    **({"alias_shadowed_by": shadowed} if shadowed else {}))
         return {**_public(chosen), "root": chosen["root"]}
 
     by_alias = [entry for entry in entries if text in entry["aliases"]]
     if len(by_alias) > 1:
+        labels = sorted(e["label"] for e in by_alias)
+        trace.event("identity.refused", level="error", rule="ambiguous-alias", ref=text, lanes=labels)
         raise IdentityDuplicate(
             f"the alias {text!r} is claimed by {', '.join(sorted(e['label'] for e in by_alias))} — "
             f"repair one with `identity --break-duplicate <label>`")
     if by_alias:
         chosen = by_alias[0]
+        trace.event("identity.resolve", level="debug", channel=chosen["label"], by="alias", ref=text)
         return {**_public(chosen), "root": chosen["root"]}
 
     # A directory that exists without a usable identity is not "no such lane": it is a lane whose id was never
@@ -271,11 +299,15 @@ def resolve(profiles, ref) -> dict:
     directory = Path(profiles) / text
     if directory.is_dir():
         read(directory)                     # raises IdentityInvalid for a corrupt file
+        trace.event("identity.refused", level="error", channel=text, rule="missing-identity",
+                    fix="identity --adopt")
         raise IdentityMissing(
             f"{directory / IDENTITY} is missing — this lane has no id.\n"
             f"Mint one with `./athena-agent/athena.sh identity --adopt {text}`.\n"
             f"That mints a NEW id; an id that was never written cannot be recovered.")
 
+    trace.event("identity.refused", level="error", rule="unknown-lane", ref=text,
+                known=_candidates(profiles))
     raise UnknownAgent(f"{text!r} names no lane — known lanes: {_candidates(profiles)}")
 
 
@@ -335,23 +367,33 @@ def ref_ok(ref) -> bool:
 def new_label_problem(profiles, label) -> str:
     """\"\" when `label` may become a directory, else the reason. The one predicate every creation path applies."""
     text = str(label or "").strip()
+    rule, problem = "", ""
     if not label_ok(text):
-        return f"{text!r} is not a label: letters, digits, - and _ only, 1-64 characters"
-    if text == "default":
-        return "the queen lane is 'default' and is not created by this path"
-    target = Path(profiles) / text
-    if target.exists():
-        try:
-            record = read(target)
-        except IdentityInvalid as exc:
-            return f"{target} exists with an unusable identity ({exc}) — adopt or remove it first"
-        if record is None:
-            return f"{target} exists without an identity.json — adopt it with `identity --adopt {text}`"
-        return f"{target} already names a lane"
-    for entry in _entries(profiles):
-        if text in entry["aliases"]:
-            return f"{text!r} is already an alias of the lane {entry['label']!r}"
-    return ""
+        rule, problem = "not-a-label", f"{text!r} is not a label: letters, digits, - and _ only, 1-64 characters"
+    elif text == "default":
+        rule, problem = "queen-lane", "the queen lane is 'default' and is not created by this path"
+    else:
+        target = Path(profiles) / text
+        if target.exists():
+            try:
+                record = read(target)
+            except IdentityInvalid as exc:
+                rule, problem = "exists-unusable", \
+                    f"{target} exists with an unusable identity ({exc}) — adopt or remove it first"
+            else:
+                if record is None:
+                    rule, problem = "exists-no-identity", \
+                        f"{target} exists without an identity.json — adopt it with `identity --adopt {text}`"
+                else:
+                    rule, problem = "exists-lane", f"{target} already names a lane"
+        else:
+            for entry in _entries(profiles):
+                if text in entry["aliases"]:
+                    rule, problem = "alias-taken", f"{text!r} is already an alias of the lane {entry['label']!r}"
+                    break
+    if problem:
+        trace.event("identity.label.refused", level="debug", label=text, rule=rule)
+    return problem
 
 
 # -- aliases -------------------------------------------------------------------
@@ -394,12 +436,16 @@ def _add_alias_locked(profiles, ref, alias: str) -> dict:
     record = resolve(profiles, ref)
     problem = _alias_problem(profiles, record, alias)
     if problem:
+        trace.event("identity.refused", level="error", channel=record["label"], rule="alias",
+                    alias=str(alias), why=problem)
         raise Conflict(problem)
     text = str(alias).strip()
     current = require(record["root"])
     aliases = [name for name in (current.get("aliases") or []) if name != text] + [text]
     current["aliases"] = aliases
     _write(record["root"], current)
+    trace.event("identity.alias", level="info", channel=record["label"], action="added", alias=text,
+                aliases=len(aliases))
     return {**record, "aliases": aliases}
 
 
@@ -414,7 +460,11 @@ def _drop_alias_locked(profiles, ref, alias: str) -> dict:
     current = require(record["root"])
     aliases = [name for name in (current.get("aliases") or []) if name != text]
     if len(aliases) == len(current.get("aliases") or []):
+        trace.event("identity.refused", level="error", channel=record["label"], rule="not-an-alias",
+                    alias=text)
         raise Conflict(f"{text!r} is not an alias of {record['label']!r}")
     current["aliases"] = aliases
     _write(record["root"], current)
+    trace.event("identity.alias", level="info", channel=record["label"], action="dropped", alias=text,
+                aliases=len(aliases))
     return {**record, "aliases": aliases}

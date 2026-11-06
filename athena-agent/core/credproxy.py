@@ -25,6 +25,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from core.jsonio import read_json
+from core import trace
 
 MAX_BODY = 8 * 1024 * 1024
 
@@ -88,24 +89,31 @@ class Handler(BaseHTTPRequestHandler):
     def _handle(self) -> None:
         cfg = self.server.settings                        # type: ignore[attr-defined]
         if self.headers.get("x-athena-proxy") != cfg["token"]:
+            trace.event("cred.refused", level="error", rule="proxy-token", status=401, path=self.path)
             self._fail(401, "credproxy: missing or wrong proxy token")
             return
 
         upstream = (self.headers.get("x-athena-upstream") or "").strip()
         if not upstream:
+            trace.event("cred.refused", level="error", rule="no-upstream", status=400, path=self.path)
             self._fail(400, "credproxy: x-athena-upstream header is required")
             return
         if not upstream.startswith("https://") and not upstream.startswith("http://127.0.0.1"):
+            trace.event("cred.refused", level="error", rule="scheme", status=403,
+                        upstream=upstream[:160])
             self._fail(403, "credproxy: only https upstreams (or loopback) are allowed")
             return
 
         host = upstream.split("//", 1)[-1].split("/", 1)[0].split(":")[0]
         if host not in cfg["allow"]:
+            trace.event("cred.refused", level="error", rule="allowlist", status=403, host=str(host))
             self._fail(403, f"credproxy: {host} is not on the allowlist")
             return
 
         length = int(self.headers.get("content-length") or 0)
         if length > MAX_BODY:
+            trace.event("cred.refused", level="error", rule="body-too-large", status=413,
+                        host=str(host), bytes=length)
             self._fail(413, "credproxy: request body too large")
             return
         body = self.rfile.read(length) if length else b""
@@ -114,9 +122,16 @@ class Handler(BaseHTTPRequestHandler):
         key = cfg["secret"](key_name) if key_name else ""
         if not key:
             known = ", ".join(sorted(cfg["providers"])) or "none"
+            # the names, never the values: which key was looked for is the diagnosis, the value is the secret
+            trace.event("cred.refused", level="error", rule="no-key", status=500, provider=str(host),
+                        key_name=str(key_name or "any"), known=known[:200])
             self._fail(500, f"credproxy: no key for {host} (looked for {key_name or 'any'}; "
                             f"known hosts: {known})")
             return
+        # the one line that proves a key reached the resolver without the key appearing anywhere: its name and its
+        # length, which is enough to see a key was found and not enough to reconstruct any part of it
+        trace.event("cred.key", level="info", provider=str(host), key_name=str(key_name),
+                    found=True, bytes=len(key))
 
         request = urllib.request.Request(upstream, data=body, method=self.command,
                                          headers={"content-type": self.headers.get("content-type",
@@ -133,9 +148,11 @@ class Handler(BaseHTTPRequestHandler):
             status = exc.code
             content_type = exc.headers.get("content-type", "application/json") if exc.headers else "application/json"
         except Exception as exc:                       # noqa: BLE001 — reported as an HTTP error, not a traceback
+            trace.failure("cred.upstream", exc, host=str(host), method=self.command)
             self._fail(502, f"credproxy: upstream failed: {type(exc).__name__}: {exc}")
             return
 
+        trace.event("cred.upstream", level="debug", host=str(host), status=status, bytes=len(payload))
         self.send_response(status)
         self.send_header("content-type", content_type)
         self.send_header("content-length", str(len(payload)))
@@ -178,6 +195,9 @@ def serve(athena_root: Path, allow: list[str], fallback_key: str = "", timeout: 
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     httpd.settings = settings                            # type: ignore[attr-defined]
     httpd.verbose = verbose                              # type: ignore[attr-defined]
+    # the port, the hosts it will spend a key on, and how many it knows — never the token or a key
+    trace.event("cred.listen", level="info", port=httpd.server_address[1], allow=sorted(settings["allow"]),
+                providers=len(settings["providers"]), fallback=bool(fallback_key))
     print(json.dumps({"port": httpd.server_address[1], "token": settings["token"],
                       "allow": sorted(settings["allow"]), "providers": settings["providers"]}), flush=True)
     httpd.serve_forever()

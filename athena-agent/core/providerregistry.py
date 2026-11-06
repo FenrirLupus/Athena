@@ -37,7 +37,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from core import timefmt
+from core import timefmt, trace
 from core.jsonio import read_json
 from core.root import athena_root
 from core import durable
@@ -53,7 +53,12 @@ def path() -> Path:
 def load() -> dict:
     """The registry, or an empty one. A corrupt file must not stop a turn."""
     data = read_json(REGISTRY, {})
-    return data if isinstance(data, dict) else {}
+    if not isinstance(data, dict):
+        # the fallback is silent by design, so the trace is the only thing that says the file was replaced by {}
+        trace.event("provider.registry.bad", level="error", path=str(REGISTRY),
+                    got=type(data).__name__, reason="not an object — every provider vanished from view")
+        return {}
+    return data
 
 
 def save(data: dict) -> None:
@@ -67,8 +72,10 @@ def register(provider: str, *, format: str = "openai", base_url: str = "",
     """Record a provider (and optionally one of its keys). Never stores a key value."""
     provider = (provider or "").strip().lower()
     if not provider:
+        trace.event("provider.register.refused", level="error", reason="no provider name")
         raise ValueError("a provider needs a name")
     data = load()
+    existed = provider in data
     entry = data.setdefault(provider, {"format": format or "openai", "base_url": base_url,
                                        "keys": [], "models": []})
     if base_url:
@@ -87,6 +94,11 @@ def register(provider: str, *, format: str = "openai", base_url: str = "",
         entry["models"] = list(models)
         entry["models_updated"] = timefmt.stamp()
     save(data)
+    # names and counts only: a key VALUE never enters this function, and nothing here could carry one
+    trace.event("provider.register", level="debug", provider=provider, format=entry.get("format"),
+                base_url=entry.get("base_url") or "-", new=not existed,
+                key_names=[k.get("name") for k in entry.get("keys") or []],
+                models=len(entry.get("models") or []))
     return entry
 
 
@@ -95,18 +107,34 @@ def set_models(provider: str, models: list[str]) -> dict:
 
 
 def models(provider: str) -> list[str]:
-    return list((load().get((provider or "").lower()) or {}).get("models") or [])
+    label = (provider or "").lower()
+    entry = load().get(label) or {}
+    if not entry:
+        # an unknown label is why "refresh models" returns nothing: name the label that was looked up
+        trace.event("provider.unknown", level="debug", provider=label or "-", by="models")
+    return list(entry.get("models") or [])
 
 
 def keys(provider: str) -> list[dict]:
-    return list((load().get((provider or "").lower()) or {}).get("keys") or [])
+    label = (provider or "").lower()
+    entry = load().get(label) or {}
+    found = list(entry.get("keys") or [])
+    if label and not found:
+        # a provider with no key is a provider the turn will be refused for — the registry knows it, say it
+        trace.event("provider.no_key", level="debug", provider=label,
+                    reason="no key registered against this provider")
+    return found
 
 
-def fetch_models(base_url: str, key: str = "", timeout: float = 20.0) -> list[str]:
+def fetch_models(base_url: str, key: str = "", timeout: float = 20.0,
+                 provider: str = "") -> list[str]:
     """Ask the endpoint what it serves (`GET /models`) — the only honest source for a model list."""
     import httpx
+    from urllib.parse import urlsplit
 
     if not base_url:
+        trace.event("provider.refresh.refused", level="error", provider=provider or "-",
+                    reason="no base_url — nothing to ask")
         return []
     headers = {"Authorization": f"Bearer {key}"} if key else {}
     url = base_url.rstrip("/")
@@ -117,7 +145,11 @@ def fetch_models(base_url: str, key: str = "", timeout: float = 20.0) -> list[st
             resp = client.get(f"{url}/models", headers=headers)
             resp.raise_for_status()
             payload = resp.json()
-    except Exception:                                # noqa: BLE001 — a failed refresh is not an error state
+    except Exception as exc:                                # noqa: BLE001 — a failed refresh is not an error state
+        # the empty list is the refusal the caller sees; without this line "no models" has no cause
+        trace.failure("provider.refresh.failed", exc, provider=provider or "-",
+                      host=urlsplit(url).netloc, endpoint="/models",
+                      key_supplied=bool(key))
         return []
     rows = payload.get("data") if isinstance(payload, dict) else payload
     out = []
@@ -128,7 +160,10 @@ def fetch_models(base_url: str, key: str = "", timeout: float = 20.0) -> list[st
                 out.append(str(ident))
         elif isinstance(row, str):
             out.append(row)
-    return sorted(set(out))
+    out = sorted(set(out))
+    trace.event("provider.models", level="debug", provider=provider or "-",
+                host=urlsplit(url).netloc, models=len(out))
+    return out
 
 
 def set_contexts(provider: str, contexts: dict[str, int]) -> dict:
@@ -143,7 +178,8 @@ def set_contexts(provider: str, contexts: dict[str, int]) -> dict:
 
 
 
-def fetch_model_rows(base_url: str, key: str = "", timeout: float = 20.0) -> list[dict]:
+def fetch_model_rows(base_url: str, key: str = "", timeout: float = 20.0,
+                     provider: str = "") -> list[dict]:
     """The raw entries from `GET /models`, unfiltered.
 
     A provider that publishes a context length puts it here — OpenRouter as `context_length`, vLLM as `max_model_len`.
@@ -151,6 +187,7 @@ def fetch_model_rows(base_url: str, key: str = "", timeout: float = 20.0) -> lis
     configured floor remains the answer.
     """
     import httpx
+    from urllib.parse import urlsplit
 
     if not base_url:
         return []
@@ -163,10 +200,15 @@ def fetch_model_rows(base_url: str, key: str = "", timeout: float = 20.0) -> lis
             resp = client.get(f"{url}/models", headers=headers)
             resp.raise_for_status()
             payload = resp.json()
-    except Exception:                                # noqa: BLE001 — a failed refresh is not an error state
+    except Exception as exc:                                # noqa: BLE001 — a failed refresh is not an error state
+        trace.failure("provider.refresh.failed", exc, provider=provider or "-",
+                      host=urlsplit(url).netloc, endpoint="/models", rows=True)
         return []
     rows = payload.get("data") if isinstance(payload, dict) else payload
-    return [row for row in (rows or []) if isinstance(row, dict)]
+    kept = [row for row in (rows or []) if isinstance(row, dict)]
+    trace.event("provider.models", level="debug", provider=provider or "-",
+                host=urlsplit(url).netloc, rows=len(kept))
+    return kept
 
 
 CONTEXT_FIELDS = ("context_length", "max_model_len", "context_window", "max_context_length")
@@ -175,9 +217,11 @@ CONTEXT_FIELDS = ("context_length", "max_model_len", "context_window", "max_cont
 def contexts_from_rows(rows: list[dict]) -> dict[str, int]:
     """Model id → published window, for whichever of the known field names each entry uses."""
     out: dict[str, int] = {}
+    unnamed = 0
     for row in rows or []:
         ident = str(row.get("id") or row.get("name") or "").strip()
         if not ident:
+            unnamed += 1                       # a row with no id teaches nothing and cannot be keyed
             continue
         for field in CONTEXT_FIELDS:
             value = row.get(field)
@@ -188,4 +232,7 @@ def contexts_from_rows(rows: list[dict]) -> dict[str, int]:
             except (TypeError, ValueError):
                 continue
             break
+    if unnamed:
+        trace.event("provider.contexts.skipped", level="debug", rows=len(rows or []), unnamed=unnamed,
+                    with_window=len(out), reason="row has no model id")
     return out

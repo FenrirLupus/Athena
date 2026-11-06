@@ -59,14 +59,49 @@ with tempfile.TemporaryDirectory() as td:
     checks["scripts_listed"] = found["say"]["scripts"] == ["run.py"]
     checks["empty_folder_listed_without_descriptor"] = "empty-one" in found and not found["empty-one"]["has_descriptor"]
 
+    # -- a tool is a package, and the loader is the only source of them ---
+    program_tools = Path(__file__).resolve().parents[1] / "tools"
+    loose = [p.name for p in program_tools.iterdir()
+             if p.is_file() and p.suffix == ".py" and p.name not in ("__init__.py", "registry.py", "loader.py",
+                                                                    "build_pages.py")]
+    checks["no_bare_module_is_a_tool"] = loose == []
+    checks["builtin_catalogue_is_gone"] = not (program_tools / "builtins.py").exists()
+    system_dirs = [p for p in (program_tools / "system").iterdir() if p.is_dir()]
+    checks["every_builtin_is_a_folder"] = len(system_dirs) >= 10
+    checks["every_builtin_has_descriptor_and_script"] = all(
+        (folder / "TOOL.md").is_file() and any((folder / "scripts").glob("*")) for folder in system_dirs)
+
+    # a nearer root of the same name wins, and both halves of that are reported
+    write_tool(athena, "twice", SAY_DESCRIPTOR.replace("name: say", "name: twice"), SAY_SCRIPT)
+    write_tool(home, "twice", SAY_DESCRIPTOR.replace("name: say", "name: twice")
+               .replace("Repeat a word.", "The profile's version."), SAY_SCRIPT)
+    rows, notes = packs.discover_with_notes(home, athena)
+    twice = next(row for row in rows if row["name"] == "twice")
+    checks["nearer_root_wins"] = twice["origin"] == "profile" and twice["description"] == "The profile's version."
+    checks["override_is_reported"] = any(note["name"] == "twice" and note.get("replaced") == "home" for note in notes)
+
+    # a descriptor that will not parse must not take a working tool away from the root beneath it
+    (home / "tools" / "twice" / "TOOL.md").write_text("---\nname: twice\nkind: nonsense\n---\n\n# twice\n",
+                                                      encoding="utf-8")
+    rows, notes = packs.discover_with_notes(home, athena)
+    kept = next(row for row in rows if row["name"] == "twice")
+    checks["malformed_nearer_does_not_shadow"] = kept["origin"] == "home" and not kept["problems"]
+    checks["skipped_shadow_is_reported"] = any(note["name"] == "twice" and note.get("kept") == "home"
+                                               for note in notes)
+
     reg = registry_mod.Registry()
     off = packs.load_all({}, reg, home, athena)
-    checks["tool_is_not_loaded_without_permission"] = off["loaded"] == [] and reg.names() == []
+    # a system package is not an opt-in: the program's own tools are always there. What needs permission is a
+    # *user* tool, so that is what the gate must keep out.
+    checks["system_packages_load_without_packs"] = {"filesystem", "skills", "terminal", "memory"}.issubset(set(reg.names()))
+    checks["tool_is_not_loaded_without_permission"] = "say" not in reg.names() and \
+        all(row["name"] != "say" for row in off["loaded"])
 
     reg2 = registry_mod.Registry()
     on = packs.load_all({"tools": {"packs": ["say"]}}, reg2, home, athena)
-    checks["named_tool_loads"] = [r["name"] for r in on["loaded"]] == ["say"] and "say" in reg2.names()
-    checks["load_report_names_the_script"] = on["loaded"][0]["scripts"] == ["run.py"]
+    say_rows = [row for row in on["loaded"] if row["name"] == "say"]
+    checks["named_tool_loads"] = len(say_rows) == 1 and "say" in reg2.names()
+    checks["load_report_names_the_script"] = say_rows[0]["scripts"] == ["run.py"]
 
     # the script actually runs, in the sandbox, with JSON arguments
     out = reg2.invoke("say", {"word": "hello; rm -rf /"})

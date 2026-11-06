@@ -7,7 +7,9 @@ The claims worth verifying are the ones that would be lies if they were false:
   * `terminal` refuses rather than running uncontained when bubblewrap is missing
   * `computer` is off by default, and when on it reports what it found instead of pretending
 """
+import json
 import os
+import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -15,10 +17,23 @@ from pathlib import Path
 import _boot  # noqa: F401 — puts the project root on sys.path
 
 from core import paths, toolpacks
-from tools import computer as computer_mod
-from tools import filesystem, registry as registry_mod, terminal as terminal_mod
+from tools import loader, registry as registry_mod
 
 checks = {}
+
+# the implementations come from the packages, reached the way an import is: by descriptor, then by path
+PROGRAM = Path(_boot.ROOT) / "tools" / "system"
+
+
+def implementation(name):
+    row = loader.descriptor_named(name)
+    assert row is not None and row["kind"] == "script", f"{name} is not a script package"
+    return loader.import_script(row["script"])
+
+
+computer_mod = implementation("computer")
+terminal_mod = implementation("terminal")
+filesystem = implementation("filesystem")
 
 
 class Ctx:
@@ -39,13 +54,14 @@ with tempfile.TemporaryDirectory() as td:
     for d in (home / "workspace", home / "sandbox", system / "core"):
         d.mkdir(parents=True)
     (system / "core" / "loop.py").write_text("# the program\n", encoding="utf-8")
-    # the real shape: descriptors at .athena/tools/system/<name>/TOOL.md
-    for name, impl in (("filesystem", "filesystem"), ("terminal", "terminal"), ("computer", "computer")):
+    # the real shape: a package per tool — descriptors at .athena/tools/system/<name>/TOOL.md, code in scripts/
+    for name in ("filesystem", "terminal", "computer"):
         folder = athena / "tools" / "system" / name
-        folder.mkdir(parents=True)
-        (folder / "TOOL.md").write_text(
-            f"---\nname: {name}\ndescription: {name} system tool\nkind: builtin\nimpl: {impl}\n---\n\n# {name}\n",
-            encoding="utf-8")
+        (folder / "scripts").mkdir(parents=True)
+        # the descriptor as it ships: same actions and parameter schema, script beside it
+        shutil.copy(PROGRAM / name / "TOOL.md", folder / "TOOL.md")
+        shutil.copy(PROGRAM / name / "scripts" / f"{name}.py", folder / "scripts" / f"{name}.py")
+
 
     scope = paths.for_profile(home, athena_root=athena)
     cfg = {"tools": {"terminal": {"require_containment": True, "network": True, "timeout_s": 30},
@@ -59,7 +75,7 @@ with tempfile.TemporaryDirectory() as td:
     report = toolpacks.load_all(cfg, reg, home, athena, ctx=ctx)
     checks["system_loads_without_packs"] = {r["name"] for r in report["loaded"]} >= {"terminal", "computer"}
     checks["terminal_tool_registered"] = "terminal" in reg.names()
-    checks["computer_tools_registered"] = {"screenshot", "mouse_click", "browser"} <= set(reg.names())
+    checks["computer_tools_registered"] = "computer" in reg.names()
 
     # -- the shell really is contained ------------------------------------
     out = reg.invoke("terminal", {"command": "echo hello && pwd"})
@@ -104,35 +120,37 @@ with tempfile.TemporaryDirectory() as td:
     real_which = terminal_mod.shutil.which
     terminal_mod.shutil.which = lambda name: None
     try:
-        fail_reg = registry_mod.Registry()
-        for tool in terminal_mod.build(ctx):
-            fail_reg.register(tool)
-        out = fail_reg.invoke("terminal", {"command": "echo should-not-run"})
+        try:
+            out = json.dumps(terminal_mod.run({"command": "echo should-not-run"}, ctx))
+        except Exception as exc:                  # noqa: BLE001 — the refusal may come back as a ToolError
+            out = f"{type(exc).__name__}: {exc}"
         checks["refuses_without_bubblewrap"] = "bubblewrap" in out and "should-not-run" not in out
     finally:
         terminal_mod.shutil.which = real_which
 
     # -- computer is off, and says so ------------------------------------
-    caps = reg.invoke("screen_capabilities", {})
+    caps = reg.invoke("computer", {"action": "screen_capabilities"})
     checks["computer_reports_disabled"] = '"enabled": false' in caps
-    out = reg.invoke("screenshot", {})
+    out = reg.invoke("computer", {"action": "screenshot"})
     checks["screenshot_refused_while_off"] = "switched off" in out
 
     # -- and when on, it reports capability rather than pretending --------
     on_cfg = {"tools": {"computer": {"enabled": True}}}
     on_ctx = Ctx(home, athena, scope, on_cfg)
     on_reg = registry_mod.Registry()
-    for tool in computer_mod.build(on_ctx):
-        on_reg.register(tool)
-    caps_on = on_reg.invoke("screen_capabilities", {})
+    loader.load(on_reg, ctx=on_ctx, profile_root=home, athena_root=athena, cfg=on_cfg)
+    on_tools = on_reg._tools.get("computer")
+    checks["computer_is_one_tool_with_its_verbs"] = on_tools is not None and \
+        {"screenshot", "mouse_click", "press_key"} <= set(on_tools.parameters["properties"]["action"]["enum"])
+    caps_on = on_reg.invoke("computer", {"action": "screen_capabilities"})
     checks["capabilities_reported_when_on"] = '"enabled": true' in caps_on and '"desktop"' in caps_on
-    shot = on_reg.invoke("screenshot", {})
+    shot = on_reg.invoke("computer", {"action": "screenshot"})
     # either it captured, or it named what is missing — never a crash and never a silent success
     checks["screenshot_is_honest"] = ('"ok": true' in shot) or ("error" in shot.lower())
     checks["screenshot_never_fakes_a_path"] = not ('"ok": true' in shot and '"path"' not in shot)
 
     # -- key names are translated, not passed through ---------------------
-    keyfn = {t.name: t.fn for t in computer_mod.build(Ctx(home, athena, scope, on_cfg))}["press_key"]
+    keyfn = loader.action_map(computer_mod.build, Ctx(home, athena, scope, on_cfg))["press_key"]
     try:
         keyfn(combo="ctrl+alt+t")
         checks["key_combo_accepted"] = True
@@ -147,27 +165,30 @@ with tempfile.TemporaryDirectory() as td:
     checks["buttons_are_btn_codes"] = computer_mod.BUTTONS["left"] == "0x110"
 
     # window control needs a match, and never runs without the gate
-    wmin = {t.name: t.fn for t in computer_mod.build(Ctx(home, athena, scope, on_cfg))}["window_minimize"]
+    wmin = loader.action_map(computer_mod.build, Ctx(home, athena, scope, on_cfg))["window_minimize"]
     try:
         wmin(match="")
         checks["window_needs_a_match"] = False
     except Exception as exc:                      # noqa: BLE001
         checks["window_needs_a_match"] = "match is required" in str(exc)
     off_reg = registry_mod.Registry()
-    for tool in computer_mod.build(Ctx(home, athena, scope, cfg)):
-        off_reg.register(tool)
-    checks["window_refused_while_off"] = "switched off" in off_reg.invoke("window_minimize", {"match": "dolphin"})
+    loader.load(off_reg, ctx=Ctx(home, athena, scope, cfg), profile_root=home, athena_root=athena, cfg=cfg)
+    checks["window_refused_while_off"] = "switched off" in off_reg.invoke(
+        "computer", {"action": "window_minimize", "match": "dolphin"})
 
-    # -- filesystem tools are still the same ten, and still guarded ------
+    # -- filesystem is one tool with ten verbs, and still guarded --------
     fs_ctx = filesystem.Context(scope=scope, approvals=None)
     fs_ctx.cfg, fs_ctx.profile_root, fs_ctx.athena_root = cfg, home, athena
     fs_reg = registry_mod.Registry()
-    for tool in filesystem.build(fs_ctx):
-        fs_reg.register(tool)
-    out = fs_reg.invoke("write", {"path": str(system / "core" / "loop.py"), "content": "pwned"})
+    loader.load(fs_reg, ctx=fs_ctx, profile_root=home, athena_root=athena, cfg=cfg)
+    actions = fs_reg._tools["filesystem"].parameters["properties"]["action"]["enum"]
+    checks["filesystem_is_one_tool_with_ten_verbs"] = actions == ["ls", "read", "write", "append", "mkdir", "move",
+                                                                 "copy", "delete", "stat", "find"]
+    out = fs_reg.invoke("filesystem", {"action": "write", "path": str(system / "core" / "loop.py"), "content": "pwned"})
     checks["filesystem_still_refuses_program"] = "ATHENA_SYSTEM" in out
     checks["filesystem_still_writes_sandbox"] = '"ok"' not in out and fs_reg.invoke(
-        "write", {"path": str(home / "sandbox" / "ok.txt"), "content": "fine"}) != ""
+        "filesystem", {"action": "write", "path": str(home / "sandbox" / "ok.txt"), "content": "fine"}) != ""
+    checks["filesystem_refuses_an_unknown_verb"] = "unknown action" in fs_reg.invoke("filesystem", {"action": "rm"})
 
 for name, passed in checks.items():
     print(f"  {'PASS' if passed else 'FAIL'}  {name}")

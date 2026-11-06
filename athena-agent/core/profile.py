@@ -18,6 +18,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from core import trace
+
 ASSISTANT_TEMPLATE = """---
 name_first: null
 name_last: null
@@ -96,18 +98,25 @@ LAYOUT = {
 
 def ensure(root: Path) -> dict:
     """Create the profile layout under `root`. Returns what was created."""
+    raw = Path(root)
+    if ".." in raw.parts:
+        # a profile written through `..` is a profile whose files land somewhere its lane does not name
+        trace.event("profile.outside", level="error", rule="parent-escape", root=str(raw),
+                    resolved=str(raw.resolve()))
     created = []
     for name, files in LAYOUT.items():
-        d = root / name
+        d = raw / name
         if not d.exists():
             d.mkdir(parents=True, exist_ok=True)
-            created.append(str(d.relative_to(root)) + "/")
+            created.append(str(d.relative_to(raw)) + "/")
         for filename, template in (files or {}).items():
             f = d / filename
             if not f.exists():
                 f.write_text(template, encoding="utf-8")
-                created.append(str(f.relative_to(root)))
-    return {"root": str(root), "created": created}
+                created.append(str(f.relative_to(raw)))
+    trace.event("profile.ensure", level="info" if created else "debug", channel=raw.name,
+                created=len(created), files=created)
+    return {"root": str(raw), "created": created}
 
 
 # -- readers used by the prompt stack ---------------------------------------
@@ -128,7 +137,9 @@ def read_identity(path: Path) -> str:
     """
     try:
         front, body = _split_front(path.read_text(encoding="utf-8", errors="replace"))
-    except OSError:
+    except OSError as exc:
+        # the prompt stack loses a persona card without a word: an empty section reads as "nothing to say"
+        trace.failure("profile.read.failed", exc, rule="identity-card", path=str(path))
         return ""
     lines = body.strip().splitlines()
     while lines and not lines[0].strip():
@@ -142,7 +153,8 @@ def read_emotion_line(path: Path) -> str:
     """The eight axes as one compact line, or '' when the file is absent or all zero."""
     try:
         front, _ = _split_front(path.read_text(encoding="utf-8", errors="replace"))
-    except OSError:
+    except OSError as exc:
+        trace.failure("profile.read.failed", exc, rule="emotion-card", path=str(path))
         return ""
     vals = []
     for line in front.splitlines():
@@ -156,7 +168,11 @@ def read_emotion_line(path: Path) -> str:
             continue
         vals.append((key.strip(), num))
     if not vals or all(abs(v) < 0.005 for _, v in vals):
+        if vals:
+            trace.event("profile.emotion", level="debug", rule="all-zero", axes=len(vals))
         return ""
+    trace.event("profile.emotion", level="debug", rule="reported", axes=len(vals),
+                largest=max(abs(v) for _, v in vals))
     return " · ".join(f"{k} {v:+.2f}" for k, v in vals)
 
 
@@ -164,7 +180,8 @@ def read_memory_rows(path: Path) -> list[str]:
     """Index records, one per line, as written. Blank lines and non-records are skipped."""
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
+    except OSError as exc:
+        trace.failure("profile.read.failed", exc, rule="memory-index", path=str(path))
         return []
     out = []
     for line in text.splitlines():

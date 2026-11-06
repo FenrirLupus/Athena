@@ -36,6 +36,7 @@ import os
 from pathlib import Path
 from core.jsonio import read_json
 from core import durable
+from core import trace
 
 # Three permission flags. Two are harmless and two are not — `list` is a read, so it rides the read flag.
 READ = "read"        # harmless: reading a file's contents
@@ -99,6 +100,14 @@ class Scope:
     # -- grants ------------------------------------------------------------
     def grant(self, url: str) -> dict:
         """Grant a folder outside the scope. Idempotent, and it says so rather than pretending."""
+        try:
+            return self._grant(url)
+        except ValueError as exc:
+            # a refusal here is the user's scope boundary being tested from the outside: name the folder, not the key
+            trace.failure("workspace.refused", exc, channel=self.home.name, url=str(url)[:200])
+            raise
+
+    def _grant(self, url: str) -> dict:
         if not url or not str(url).strip():
             raise ValueError("a workspace needs a filesystem URL")
         target = Path(str(url).strip()).expanduser()
@@ -115,6 +124,7 @@ class Scope:
                 return {"added": False, "path": str(resolved),
                         "message": f"already available: {resolved} is already in this agent's workspace list"}
         self.granted.append(resolved)
+        trace.event("workspace.granted", level="debug", channel=self.home.name, path=str(resolved))
         return {"added": True, "path": str(resolved)}
 
     def revoke(self, url: str) -> dict:
@@ -159,6 +169,10 @@ class Scope:
             # invisible to a path check — it *is* inside — so compare the device of the nearest existing parent
             # against the profile's own. No variable for this; it is a property of the path, not a setting.
             if _foreign_mount(resolved, self.home):
+                # debug, not a failure: this is a standing property of the tree, and `permissions()` probes it per
+                # path — the refusal itself is still reported by `check()`, this says *why* the flags came back empty
+                trace.event("scope.foreign_mount", level="debug", channel=self.home.name,
+                            path=str(resolved), home=str(self.home))
                 return ()
             return (READ, LIST, WRITE, MODIFY)
         if any(_within(resolved, place) for place in self.granted):
@@ -249,8 +263,12 @@ class Scope:
                     except ValueError:
                         pass
                 return resolved
-            raise ValueError(decision.message or message)
+            message = decision.message or message
 
+        # the tree this agent may touch does not contain the path: this is the escape the guard exists to stop,
+        # so it is recorded with the frame that refused, not left to the exception's text
+        trace.failure("scope.outside", channel=self.home.name, path=str(resolved), op=needed,
+                      home=str(self.home))
         raise ValueError(message)
 
 
@@ -259,7 +277,10 @@ def _profile_dirs(root: Path) -> list[Path]:
     try:
         base = Path(root) / "profiles"
         return [p.resolve() for p in base.iterdir() if p.is_dir()]
-    except OSError:
+    except OSError as exc:
+        # an unreadable profiles/ reads as "no other agents", which widens the root check — say it out loud
+        trace.event("scope.profile_dirs.unreadable", level="debug", path=str(root),
+                    error=type(exc).__name__)
         return []
 
 
@@ -301,6 +322,7 @@ def save_workspaces(profile_root: Path, entries: list[str]) -> Path:
     path = Path(profile_root) / "workspaces.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     durable.write_state(path, json.dumps({"workspaces": entries}, indent=2))
+    trace.event("workspace.saved", level="debug", channel=Path(profile_root).name, count=len(entries))
     return path
 
 

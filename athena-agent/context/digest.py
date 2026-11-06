@@ -14,6 +14,7 @@ name is included so the digest can cite its own provenance.
 from __future__ import annotations
 
 import re
+from core import trace
 from core.context_window import effective_window
 
 MAX_TRANSCRIPT_CHARS = 24_000        # the digest prompt must not itself become the context problem
@@ -60,6 +61,9 @@ def _render(evicted: list[dict]) -> str:
     text = "\n".join(lines)
     if len(text) > MAX_TRANSCRIPT_CHARS:
         # keep the end: the most recent turns are the ones the agent is most likely to need
+        trace.event("context.digest.trim", level="debug", chars=len(text), kept=MAX_TRANSCRIPT_CHARS,
+                    elided=len(text) - MAX_TRANSCRIPT_CHARS,
+                    reason="the digest prompt must not itself become the context problem")
         text = "… (earlier turns elided)\n" + text[-MAX_TRANSCRIPT_CHARS:]
     return text
 
@@ -72,6 +76,8 @@ def model_digest(provider, evicted: list[dict], snapshot_name: str, cfg: dict) -
     readable one.
     """
     if not evicted:
+        trace.event("context.digest.skipped", level="debug", snapshot=snapshot_name,
+                    reason="nothing was evicted")
         return ""
     comp = cfg.get("compression") or {}
     win = effective_window(cfg)
@@ -79,21 +85,29 @@ def model_digest(provider, evicted: list[dict], snapshot_name: str, cfg: dict) -
     max_tokens = int(comp.get("digest_max_tokens") or 0) \
         or int(win * float(comp.get("target_min_pct", 20.0)) / 100)
     system = DIGEST_SYSTEM_PROMPT.format(snapshot=snapshot_name, count=len(evicted))
+    rendered = _render(evicted)
     messages = [
         {"role": "system", "content": system},
-        {"role": "user", "content": _render(evicted)},
+        {"role": "user", "content": rendered},
     ]
-    try:
-        resp = provider.call(messages, tools=None, max_tokens=max_tokens, temperature=0.2)
-    except Exception as exc:                                  # noqa: BLE001 — fall back, never fail
-        print(f"[digest] model digest failed ({type(exc).__name__}: {exc}); using the mechanical one",
-              flush=True)
-        return ""
-    text = strip_fences((resp.get("content") or "").strip())
-    if len(text) < 40:
-        # a refusal or a truncated stub is worse than the mechanical digest
-        print(f"[digest] model returned {len(text)} chars; using the mechanical one", flush=True)
-        return ""
+    with trace.span("context.digest", level="info", snapshot=snapshot_name, evicted=len(evicted),
+                    max_tokens=max_tokens, prompt_chars=len(rendered), window=win) as sp:
+        try:
+            resp = provider.call(messages, tools=None, max_tokens=max_tokens, temperature=0.2)
+        except Exception as exc:                              # noqa: BLE001 — fall back, never fail
+            # the compression still happens; what is lost is the readable summary, so say which one ran
+            sp.fields["fallback"] = "mechanical"
+            sp.failed(exc)
+            return ""
+        text = strip_fences((resp.get("content") or "").strip())
+        if len(text) < 40:
+            # a refusal or a truncated stub is worse than the mechanical digest
+            trace.event("context.digest.refused", level="error", snapshot=snapshot_name,
+                        chars=len(text), fallback="mechanical",
+                        reason="model returned a stub or a refusal")
+            sp.ok(chars=len(text), accepted=False, fallback="mechanical")
+            return ""
+        sp.ok(chars=len(text), accepted=True)
     return text
 
 
@@ -110,11 +124,16 @@ def digest_for(provider, cfg: dict):
     from context import compress as compress_mod
 
     mode = str((cfg.get("budget") or {}).get("digest") or "auto").lower()
+    trace.event("context.digest.mode", level="debug", mode=mode, provider=provider is not None)
     if mode in ("mechanical", "off", "false"):
         return compress_mod.mechanical_digest
 
     def _digest(evicted: list[dict], snapshot_name: str = "") -> str:
         text = model_digest(provider, evicted, snapshot_name, cfg) if provider is not None else ""
+        if not text:
+            trace.event("context.digest.fallback", level="debug", snapshot=snapshot_name,
+                        evicted=len(evicted),
+                        reason="no provider" if provider is None else "model digest produced nothing")
         return text or compress_mod.mechanical_digest(evicted)
 
     return _digest

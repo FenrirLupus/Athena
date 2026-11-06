@@ -15,6 +15,7 @@ import time
 from pathlib import Path
 from core.context_window import effective_window
 from core import timefmt
+from core import trace
 from core.root import athena_root as athena_root_path
 
 
@@ -53,6 +54,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     cmd = argv[0]
+    # one line per invocation: which verb ran, on its own lane, so a CLI failure is read beside the loop's trail
+    trace.event("cli.command", channel="cli", command=cmd, args=len(argv) - 1)
 
     if cmd == "metrics":
         from core import metrics as metrics_mod

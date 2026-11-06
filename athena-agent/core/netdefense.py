@@ -22,6 +22,8 @@ import time
 from collections import defaultdict, deque
 from pathlib import Path
 
+from core import trace
+
 SENSITIVE_PREFIXES = ("/security", "/config", "/approvals", "/agents", "/metrics", "/docs")
 # Served without a token so the page can hand the browser its cookie. Content only — no state, no transcript.
 PUBLIC_PREFIXES = ("/", "/index.html", "/html/", "/js/", "/css/", "/favicon", "/health")
@@ -100,15 +102,24 @@ class InboundGuard:
     def evaluate(self, client: str, path: str, headers: dict) -> tuple[int, str] | None:
         """Return (status, reason) to refuse, or None to let it through."""
         if not path.startswith(self.STATIC_PREFIXES) and self.limiter.hit(client):
-            return 429, f"rate limit exceeded ({self.limiter.count(client)} in 60s)"
+            count = self.limiter.count(client)
+            trace.event("net.rate_limit", level="error", client=client, path=path, count=count,
+                        limit=self.limiter.per_minute)
+            return 429, f"rate limit exceeded ({count} in 60s)"
         if not _is_loopback(client):
             if self.loopback_only and self._sensitive(path):
+                trace.event("net.refused", level="error", status=403, rule="loopback-only",
+                            client=client, path=path)
                 return 403, f"non-loopback client {client} requested a local-only path"
             if self.token and headers.get("authorization") != f"Bearer {self.token}":
+                trace.event("net.refused", level="error", status=401, rule="remote-token",
+                            client=client, path=path)
                 return 401, f"non-loopback client {client} did not present the API token"
 
         if self.require_token and not self._public(path):
             if self._presented_token(headers) != self.token:
+                trace.event("net.refused", level="error", status=401, rule="api-token",
+                            client=client, path=path)
                 return 401, "missing or wrong API token (set it as a cookie or X-Athena-Token header)"
         return None
 
@@ -152,6 +163,8 @@ class InboundGuard:
             self.ledger.record("blue", f"inbound-{status}", f"{scope.get('method')} {path}", path, "")
         elif status >= 500:
             self.ledger.record("red", "inbound-500", f"{scope.get('method')} {path} failed", path, "")
+            trace.event("net.inbound_failed", level="error", status=status, path=path,
+                        method=str(scope.get("method") or "-"))
 
 
 def _hex_to_ip(text: str) -> str:
@@ -217,16 +230,23 @@ def established(proc_net: Path, inodes: set[str] | None = None) -> list[dict]:
     return rows
 
 
-def _allowed(ip: str, allow_hosts: set[str], allow_ips: set[str]) -> bool:
-    if not ip or ip in allow_ips:
-        return True
+def _verdict(ip: str, allow_hosts: set[str], allow_ips: set[str]) -> tuple[bool, str]:
+    """(allowed, rule) — the rule is what a trail needs to say; "denied" alone is not actionable."""
+    if not ip:
+        return True, "empty"
+    if ip in allow_ips or ip in allow_hosts:
+        return True, "allowlist"
     try:
         address = ipaddress.ip_address(ip)
     except ValueError:
-        return False
+        return False, "unparseable"
     if address.is_loopback:
-        return True
-    return ip in allow_hosts
+        return True, "loopback"
+    return False, "not-allowlisted"
+
+
+def _allowed(ip: str, allow_hosts: set[str], allow_ips: set[str]) -> bool:
+    return _verdict(ip, allow_hosts, allow_ips)[0]
 
 
 def outbound_findings(ledger, allow: list[str] | None = None,
@@ -240,6 +260,7 @@ def outbound_findings(ledger, allow: list[str] | None = None,
             for info in socket.getaddrinfo(host, None):
                 allow_ips.add(info[4][0])
         except (socket.gaierror, OSError):
+            trace.event("net.dns", level="debug", host=str(host), why="allowlist host did not resolve")
             continue
 
     findings = []
@@ -251,8 +272,14 @@ def outbound_findings(ledger, allow: list[str] | None = None,
             if key in seen:
                 continue
             seen.add(key)
-            if _allowed(row["remote_ip"], allow_ips, {"127.0.0.1", "::1"}):
+            allowed, rule = _verdict(row["remote_ip"], allow_ips, {"127.0.0.1", "::1"})
+            if allowed:
+                # the allow list is the answer to "where did we reach?" — one line per destination, no payload
+                trace.event("net.egress", level="debug", host=row["remote_ip"], port=row["remote_port"],
+                            verdict="allow", rule=rule)
                 continue
+            trace.event("net.egress", level="error", host=row["remote_ip"], port=row["remote_port"],
+                        verdict="deny", rule=rule)
             findings.append({
                 "severity": "high", "team": "red", "kind": "outbound-unexpected",
                 "path": f"{row['remote_ip']}:{row['remote_port']}",
@@ -289,6 +316,7 @@ def ensure_token(athena_root, rotate: bool = False) -> str:
         try:
             value = path.read_text(encoding="utf-8").strip()
             if value:
+                trace.event("net.token", level="debug", action="reused", path=str(path))
                 return value
         except OSError:
             pass
@@ -299,4 +327,7 @@ def ensure_token(athena_root, rotate: bool = False) -> str:
         os.chmod(path, 0o600)
     except OSError:
         pass
+    # the value is the door key: the trail records that one was minted and where it lives, never what it is
+    trace.event("net.token", level="debug", action="rotated" if rotate else "generated", path=str(path),
+                bytes=len(value))
     return value

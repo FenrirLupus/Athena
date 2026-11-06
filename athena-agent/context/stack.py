@@ -12,6 +12,7 @@ import math
 from pathlib import Path
 
 from core import profile as profile_mod
+from core import trace
 from core.context_window import effective_window
 
 CHARS_PER_TOKEN = 4.0          # the raw estimate; the *calibrated* ratio comes from what providers bill
@@ -39,7 +40,7 @@ def chars_per_token(factor: float = 1.0) -> float:
     return CHARS_PER_TOKEN / max(1.0, float(factor or 1.0))
 
 
-def allocate(window: int, cfg: dict) -> dict:
+def allocate(window: int, cfg: dict, channel: str = "") -> dict:
     """Token budget per block, from the configured percentages, rounded to nearest."""
     b = cfg.get("budget") or {}
     m = cfg.get("model") or {}
@@ -65,21 +66,33 @@ def allocate(window: int, cfg: dict) -> dict:
     out["allocated"] = sum(out[k] for k in ("system", "assistant", "user", "summary",
                                             "history", "memory", "output"))
     out["free"] = window - out["allocated"]
+    # free < 0 means the shares over-subscribe the window before a single token is sent: the one arithmetic
+    # fact about the budget that is invisible until the provider rejects the prompt
+    trace.event("context.allocate", level="debug", channel=channel, window=window,
+                system=out["system"], assistant=out["assistant"], user=out["user"],
+                summary=out["summary"], history=out["history"], memory=out["memory"],
+                output=out["output"], allocated=out["allocated"], free=out["free"],
+                over_subscribed=out["free"] < 0)
     return out
 
 
-def _fit(text: str, budget_tokens: int, what: str, factor: float = 1.0) -> str:
+def _fit(text: str, budget_tokens: int, what: str, factor: float = 1.0, channel: str = "") -> str:
     """Truncate a block to its share, saying so rather than losing the tail silently."""
     if not text:
         return ""
-    if est_tokens(text, factor) <= budget_tokens:
+    used = est_tokens(text, factor)
+    if used <= budget_tokens:
         return text
     keep = max(0, int(budget_tokens * chars_per_token(factor)))
+    trace.event("context.trim", level="debug", channel=channel, block=what,
+                before_tokens=used, budget_tokens=budget_tokens, kept_chars=keep,
+                dropped_chars=max(0, len(text) - keep), reason="block is over its share of the window")
     return text[:keep] + f"\n[{what} truncated to its budget]"
 
 
 def build(instructions: str, channel_root: Path, history: list[dict], user_text: str,
-          cfg: dict, summary: str = "", factor: float = 1.0) -> tuple[list[dict], dict]:
+          cfg: dict, summary: str = "", factor: float = 1.0,
+          channel: str = "") -> tuple[list[dict], dict]:
     """Return (messages, report) for one model call.
 
     The system block is assembled ONCE per turn and never mutated mid-turn — prompt caching is
@@ -89,21 +102,23 @@ def build(instructions: str, channel_root: Path, history: list[dict], user_text:
     appending it again here would put every tool result before the last user message.
     """
     win = effective_window(cfg)
-    alloc = allocate(win, cfg)
+    alloc = allocate(win, cfg, channel=channel)
 
     # labelled parts, so the report can say WHICH block costs what — a total of ~890 tokens tells you to
     # optimise something; a breakdown tells you what, and every later cut is then measurable
     blocks: list[tuple[str, str]] = []
     if instructions.strip():
-        blocks.append(("instructions", _fit(instructions.strip(), alloc["system"], "instructions", factor)))
+        blocks.append(("instructions", _fit(instructions.strip(), alloc["system"], "instructions", factor,
+                                            channel)))
 
     if summary.strip():
         blocks.append(("summary", "# What happened before this window\n\n"
-                       + _fit(summary.strip(), alloc["summary"], "summary", factor)))
+                       + _fit(summary.strip(), alloc["summary"], "summary", factor, channel)))
 
     asst_body = profile_mod.read_identity(channel_root / "assistant" / "ASSISTANT.md")
     if asst_body:
-        blocks.append(("assistant", "# Who I am\n\n" + _fit(asst_body, alloc["assistant"], "identity", factor)))
+        blocks.append(("assistant", "# Who I am\n\n"
+                       + _fit(asst_body, alloc["assistant"], "identity", factor, channel)))
     asst_mood = profile_mod.read_emotion_line(channel_root / "assistant" / "EMOTION.md")
     if asst_mood:
         blocks.append(("assistant_emotion", f"# How I am right now\n\n{asst_mood}"))
@@ -113,11 +128,12 @@ def build(instructions: str, channel_root: Path, history: list[dict], user_text:
         block = "\n".join(mem_rows)
         blocks.append(("memory", "# Memory — index of what I have learned\n\n"
                        "(these are pointers; read the body before relying on it)\n\n"
-                       + _fit(block, alloc["memory"], "memory index", factor)))
+                       + _fit(block, alloc["memory"], "memory index", factor, channel)))
 
     user_body = profile_mod.read_identity(channel_root / "user" / "USER.md")
     if user_body:
-        blocks.append(("user", "# Who I serve\n\n" + _fit(user_body, alloc["user"], "user identity", factor)))
+        blocks.append(("user", "# Who I serve\n\n"
+                       + _fit(user_body, alloc["user"], "user identity", factor, channel)))
     user_mood = profile_mod.read_emotion_line(channel_root / "user" / "EMOTION.md")
     if user_mood:
         blocks.append(("user_emotion", f"# How they are right now\n\n{user_mood}"))
@@ -135,13 +151,23 @@ def build(instructions: str, channel_root: Path, history: list[dict], user_text:
         kept.append(msg)
         used += cost
     kept.reverse()
+    if len(kept) < len(history):
+        trace.event("context.trim", level="debug", channel=channel, block="history",
+                    dropped=len(history) - len(kept), kept=len(kept), used_tokens=used,
+                    budget_tokens=alloc["history"],
+                    reason="the oldest turns do not fit the history share")
 
     # The window is cut newest-first, so it can land *between* an assistant message carrying tool_calls and the
     # tool results answering it. A provider rejects that sequence ("messages with role 'tool' must be a response to
     # a preceding message with 'tool_calls'"), and in practice it made any long tool-using turn fail at the fourth
     # round. Repair the boundary: drop leading tool rows whose call was left outside the window.
+    orphaned = 0
     while kept and kept[0].get("role") == "tool":
         kept.pop(0)
+        orphaned += 1
+    if orphaned:
+        trace.event("context.trim", level="info", channel=channel, block="history.tool_head",
+                    dropped=orphaned, reason="tool result whose call was left outside the window")
 
     messages = [{"role": "system", "content": system_text}] + kept
 
@@ -165,4 +191,10 @@ def build(instructions: str, channel_root: Path, history: list[dict], user_text:
     total = report["prompt_tokens_est"] or 1
     report["blocks_share_pct"] = {name: round(100.0 * tokens / total, 1)
                                  for name, tokens in block_tokens.items()}
+    # what went in, in one line: the block list is the answer to "why is the prompt this size"
+    trace.event("context.build", level="debug", channel=channel, window=win,
+                blocks=list(block_tokens), system_tokens=report["system_tokens"],
+                history_tokens=used, history_turns=len(kept),
+                dropped_turns=report["dropped_turns"], memory_rows=report["memory_rows"],
+                prompt_tokens_est=report["prompt_tokens_est"], calibration=report["calibration"])
     return messages, report

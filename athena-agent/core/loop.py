@@ -14,9 +14,9 @@ from __future__ import annotations
 
 import re as mode_mod
 import time
-import traceback
 
 from context import stack as stack_mod
+from core import trace
 from core.budget import IterationBudget
 from core.context_window import effective_window
 
@@ -31,6 +31,7 @@ class TurnResult(dict):
             raise AttributeError(name) from exc
 
 
+@trace.lane_bound
 def run_turn(*, channel: str, channel_root, session, provider, tools_registry,
              instructions: str, user_text: str, cfg: dict,
              budget: IterationBudget | None = None,
@@ -70,9 +71,15 @@ def run_turn(*, channel: str, channel_root, session, provider, tools_registry,
     model_key = f"{described.get('provider') or model.get('provider') or '?'}:" \
                 f"{described.get('model') or model.get('name') or '?'}"
     factor = calibration_mod.factor_for(channel_root, model_key)
+    prov_name = str(described.get("provider") or model.get("provider") or "?")
+    model_name = str(described.get("model") or model.get("name") or "?")
+    # the whole turn is one lane: every line below reads as a heartbeat against this opening frame
+    trace.event("turn.start", level="info", channel=channel, mode=mode, provider=prov_name,
+                model=model_name, max_turns=budget.max_turns, max_usd=budget.max_usd)
     status = "completed"
     reply = ""
     calls = 0
+    tool_names_used: list[str] = []
     tool_rounds = 0
     # measurable per turn: tokens are what the provider reports, seconds are what the caller waits
     usage_totals = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
@@ -88,8 +95,14 @@ def run_turn(*, channel: str, channel_root, session, provider, tools_registry,
         while True:
             if not budget.consume_turn():
                 status = budget.exhausted_reason() or "exhausted_budget"
+                trace.event("turn.exhausted", level="info", channel=channel, turn=budget.turns,
+                            reason=status, calls=calls, tool_rounds=tool_rounds,
+                            cost_usd=round(budget.cost_usd, 6), max_usd=budget.max_usd)
                 break
             calls += 1
+            trace.event("turn.iteration", level="debug", channel=channel, turn=calls,
+                        of=budget.max_turns, tool_rounds=tool_rounds,
+                        cost_usd=round(budget.cost_usd, 6), ceiling_usd=budget.max_usd)
 
             # compression happens at the turn boundary, before assembly — never mid-turn
             prompt_estimate = int((last_report or {}).get("prompt_tokens_est") or 0)
@@ -142,38 +155,58 @@ def run_turn(*, channel: str, channel_root, session, provider, tools_registry,
             # without trusting the model's account of its own instructions
             system_text = messages[0].get("content", "") if messages else ""
 
+            tool_schemas = tools_registry.schemas()
+            call_started = time.perf_counter()
             try:
-                call_started = time.perf_counter()
-                resp = provider.call(
-                    messages,
-                    tools=tools_registry.schemas(),
-                    max_tokens=int(model.get("max_output_tokens") or 1024),
-                    temperature=float(model.get("temperature") or 0.7),
-                )
-                call_seconds = round(time.perf_counter() - call_started, 3)
+                # one → and one ← per call: that pair is the heartbeat a transcript is read against
+                with trace.span("model.call", channel=channel, turn=calls, provider=prov_name,
+                                model=model_name, mode=mode, messages=len(messages),
+                                prompt_est=prompt_estimate or _estimate_tokens(messages),
+                                tools=len(tool_schemas), stream=False,
+                                max_tokens=int(model.get("max_output_tokens") or 1024)) as sp:
+                    # the adapter's own lines inherit this lane/turn, so wire detail sorts with the pair
+                    from providers import base as provider_base
+
+                    with provider_base.trace_scope(channel=channel, turn=calls):
+                        resp = provider.call(
+                            messages,
+                            tools=tool_schemas,
+                            max_tokens=int(model.get("max_output_tokens") or 1024),
+                            temperature=float(model.get("temperature") or 0.7),
+                        )
+                    call_seconds = round(time.perf_counter() - call_started, 3)
+                    call_usage = resp.get("usage") or {}
+                    call_prompt = int(call_usage.get("prompt_tokens") or call_usage.get("input_tokens") or 0)
+                    call_done = (int(call_usage.get("completion_tokens") or call_usage.get("output_tokens") or 0)
+                                 + int(call_usage.get("reasoning_tokens") or 0))
+                    sp.ok(prompt_tokens=call_prompt, completion_tokens=call_done,
+                          finish=resp.get("finish_reason") or "?",
+                          tool_calls=len(resp.get("tool_calls") or []),
+                          seconds=call_seconds)
             except Exception as exc:                  # noqa: BLE001 — model call failures are per-turn
                 # NOT a system message: appending one mid-conversation is the trap doc 02 names, and a
                 # template that requires "system first" then rejects every later turn. The failure is
-                # reported in the turn result and the log, never injected into the transcript.
+                # reported in the turn result and the trace, never injected into the transcript.
                 text = str(exc)
-                print(f"model call failed: {text}", file=__import__("sys").stderr)
                 # A provider that has run out of credit answers 402, and that is not a bug in the turn: it is a
                 # state the operator has to change. It gets its own status so nothing retries it as if it were a
                 # transient API fault, and so the interface can say what to do rather than echoing a stack line.
                 if "402" in text or "insufficient" in text.lower() or "quota" in text.lower():
                     status = "error_balance"
+                    trace.event("turn.status", level="info", channel=channel, turn=calls,
+                                status=status, why="provider refused: no remaining balance",
+                                provider=prov_name)
                     reply = ("The provider refused this turn: the account has no remaining balance. "
                              "Top up the provider, or point this agent at a local model "
                              "(model.provider: local in its config.yaml).")
                 else:
                     status = "error_api"
+                    trace.event("turn.status", level="info", channel=channel, turn=calls,
+                                status=status, why="model call failed", provider=prov_name,
+                                exc=text[:200])
                     reply = f"model call failed: {text}"
                 break
 
-            call_usage = resp.get("usage") or {}
-            call_prompt = int(call_usage.get("prompt_tokens") or call_usage.get("input_tokens") or 0)
-            call_done = (int(call_usage.get("completion_tokens") or call_usage.get("output_tokens") or 0)
-                         + int(call_usage.get("reasoning_tokens") or 0))
             usage_totals["prompt_tokens"] += call_prompt
             usage_totals["completion_tokens"] += call_done
             usage_totals["total_tokens"] += (int(call_usage.get("total_tokens") or 0)
@@ -204,6 +237,10 @@ def run_turn(*, channel: str, channel_root, session, provider, tools_registry,
             if budget.exhausted() and not resp.get("tool_calls"):
                 # spent the ceiling and still got an answer — that is a completed turn
                 status = "completed"
+                trace.event("budget.spent", level="info", channel=channel, turn=calls,
+                            reason=budget.exhausted_reason() or "ceiling reached",
+                            cost_usd=round(budget.cost_usd, 6), max_usd=budget.max_usd,
+                            status="completed")
             content = resp.get("content") or ""
             tool_calls = resp.get("tool_calls") or []
 
@@ -226,6 +263,7 @@ def run_turn(*, channel: str, channel_root, session, provider, tools_registry,
                 reply = content
                 break
 
+            tool_names_used.extend(str(c.get("name") or "") for c in tool_calls)
             # the model asked for tools: record the call, run each, answer every one
             session.add_assistant_tool_calls(mode_mod.sub(r"^\s*\[(?:Voice|Message)\]\s*", "", content or ""),
                                              tool_calls)
@@ -240,7 +278,8 @@ def run_turn(*, channel: str, channel_root, session, provider, tools_registry,
     except Exception as exc:                          # noqa: BLE001 — the turn must always return
         status = "error_loop"
         reply = f"loop error: {exc}"
-        print(f"loop error: {exc}\n{traceback.format_exc(limit=3)}", file=__import__("sys").stderr)
+        trace.failure("turn.error", exc, channel=channel, turn=calls, status=status,
+                      tool_rounds=tool_rounds, calls=calls)
 
     from core import budget as budget_mod
     budget_mod.leave(channel)
@@ -254,12 +293,18 @@ def run_turn(*, channel: str, channel_root, session, provider, tools_registry,
     if reply:
         reply = __import__("re").sub(r"^\s*\[(?:Voice|Message)\]\s*", "", reply)
     session.add("assistant", ("[Voice] " if mode == "call" else "[Message] ") + reply if reply else reply)
+    # the turn closes with the numbers that decide what the operator does next: outcome, spend, time
+    trace.event("turn.end", level="info", channel=channel, turn=calls, status=status,
+                calls=calls, tool_rounds=tool_rounds, tools_used=len(tool_names_used),
+                tokens=usage_totals["total_tokens"], cost_usd=round(budget.cost_usd, 6),
+                seconds=round(time.time() - started, 3))
     return TurnResult({
         "channel": channel,
         "status": status,
         "reply": reply,
         "calls": calls,
         "tool_rounds": tool_rounds,
+        "tool_names": tool_names_used,
         "budget": budget.snapshot(),
         "prompt": last_report,
         "system_prompt": system_text[-3000:],
@@ -346,9 +391,15 @@ def _maybe_compress(session, cfg: dict, factor: float = 1.0, provider=None,
         evict += 1
     if evict <= 0:
         return None
+    evicted_span = msgs[:evict]
     # the digest is written by the turn's own provider (context/digest.py), with the mechanical one as fallback
     from context import digest as digest_mod
     result = session.compress(evict, digest_fn=digest_mod.digest_for(provider, cfg))
+    try:                                    # evicted turns are offered, never promoted; memory stays the agent's choice
+        from tools import memory as memory_tools
+        memory_tools.offer_candidates(getattr(session, "root", None), evicted_span)
+    except Exception:                       # noqa: BLE001 — a full disk must not stop a turn
+        pass
     return {"evicted": result.get("evicted"), "retained": result.get("retained"),
             "snapshot": result.get("snapshot"), "vaulted": result.get("vaulted"),
             "summary_written": result.get("summary_written")}

@@ -29,6 +29,7 @@ import time
 from pathlib import Path
 from core.jsonio import read_json
 from core import durable
+from core import trace
 
 BASELINE_NAME = "baseline.json"
 LEDGER_NAME = "events.jsonl"
@@ -120,8 +121,13 @@ class Ledger:
         try:
             with self._lock, self.path.open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(row) + "\n")
-        except OSError:
+        except OSError as exc:
+            # a refusal that never reached the ledger is an attempt the red team cannot attribute later
+            trace.failure("security.ledger.failed", exc, channel="security", team=team, kind=kind,
+                          path=str(path) or "-", ledger=str(self.path))
             return False
+        trace.event("security.ledger", level="debug", channel="security", team=team, kind=kind,
+                    path=str(path) or "-", lane=str(lane) or "-", suppressed=suppressed or 0)
         self._rotate_if_large()
         return True
 
@@ -187,6 +193,8 @@ class Baseline:
             os.chmod(self.path, 0o400)      # read-only once written: the baseline is evidence, not a working file
         except OSError:
             pass
+        trace.event("security.baseline", channel="security", files=len(rows), root=str(self.athena_root),
+                    path=str(self.path))
         return {"files": len(rows), "path": str(self.path)}
 
     def load(self) -> dict:
@@ -199,7 +207,11 @@ def classify(rel_path: str, ledger: Ledger, window_s: float = 3600.0) -> tuple[s
     for row in ledger.recent(window_s):
         recorded = str(row.get("path") or "").rstrip("/")
         if recorded and (recorded.endswith(target) or target.endswith(recorded) or recorded == target):
+            trace.event("security.attribution", level="debug", channel="security", path=rel_path,
+                        team="red", rule="ledger-match", kind=row.get("kind"), lane=row.get("lane") or "-")
             return "red", f"the runtime ledger shows an internal attempt on this path ({row.get('kind')})"
+    trace.event("security.attribution", level="debug", channel="security", path=rel_path,
+                team="blue", rule="no-internal-request")
     return "blue", "no internal request for this path was recorded — the change came from outside"
 
 
@@ -210,6 +222,8 @@ def check(athena_root: Path, folder: Path, ledger: Ledger,
     data = baseline.load()
     known = data.get("files") or {}
     if not known:
+        trace.event("security.check", level="error", channel="security", rule="no-baseline",
+                    root=str(athena_root), findings=1)
         return [{"severity": "medium", "team": "blue", "kind": "no-baseline",
                  "path": "", "detail": "no baseline exists — build one with `./athena.sh security baseline`",
                  "guidance": "The architecture cannot tell you whether it has been changed. Ask the user to "
@@ -250,6 +264,9 @@ def check(athena_root: Path, folder: Path, ledger: Ledger,
             findings.append({"severity": "critical", "team": team, "kind": "removed",
                              "path": rel, "detail": f"file is gone ({why})",
                              "guidance": _guidance(team, "removed")})
+    trace.event("security.check", channel="security", files=len(known), findings=len(findings),
+                red=sum(1 for f in findings if f["team"] == "red"),
+                blue=sum(1 for f in findings if f["team"] == "blue"))
     return sorted(findings, key=lambda f: (-SEVERITY.get(f["severity"], 0), f["path"]))
 
 
@@ -317,26 +334,33 @@ class SecurityWatch(threading.Thread):
         self.last: dict = {"at": 0.0, "findings": [], "counts": {"red": 0, "blue": 0}}
 
     def sweep(self) -> dict:
-        findings = check(self.athena_root, self.folder, self.ledger, self.baseline)
-        if self.extras is not None:
+        with trace.span("security.sweep", level="info", channel="security",
+                        root=str(self.athena_root)) as sp:
+            findings = check(self.athena_root, self.folder, self.ledger, self.baseline)
+            if self.extras is not None:
+                try:
+                    findings = findings + list(self.extras() or [])
+                except Exception as exc:             # noqa: BLE001 — a watcher must not die on one source
+                    trace.event("security.extras.failed", level="error", channel="security",
+                                exc=f"{type(exc).__name__}: {exc}")
+            meta = self.baseline.load()
+            text = report(findings, meta, len(self.ledger.recent()))
             try:
-                findings = findings + list(self.extras() or [])
-            except Exception:                        # noqa: BLE001 — a watcher must not die on one source
-                pass
-        meta = self.baseline.load()
-        text = report(findings, meta, len(self.ledger.recent()))
-        try:
-            (self.folder / REPORT_NAME).write_text(text, encoding="utf-8")
-        except OSError:
-            pass
-        counts = {"red": sum(1 for f in findings if f["team"] == "red"),
-                  "blue": sum(1 for f in findings if f["team"] == "blue")}
-        self.last = {"at": time.time(), "findings": findings, "counts": counts}
-        if findings and self.onset is not None:
-            try:
-                self.onset(findings)
-            except Exception:                        # noqa: BLE001 — a watcher must not die
-                pass
+                (self.folder / REPORT_NAME).write_text(text, encoding="utf-8")
+            except OSError as exc:
+                # the findings still return to the caller; the file the agents are pointed at is stale
+                trace.failure("security.report.failed", exc, channel="security",
+                              path=str(self.folder / REPORT_NAME), findings=len(findings))
+            counts = {"red": sum(1 for f in findings if f["team"] == "red"),
+                      "blue": sum(1 for f in findings if f["team"] == "blue")}
+            self.last = {"at": time.time(), "findings": findings, "counts": counts}
+            if findings and self.onset is not None:
+                try:
+                    self.onset(findings)
+                except Exception as exc:             # noqa: BLE001 — a watcher must not die
+                    trace.event("security.onset.failed", level="error", channel="security",
+                                findings=len(findings), exc=f"{type(exc).__name__}: {exc}")
+            sp.ok(findings=len(findings), red=counts["red"], blue=counts["blue"])
         return self.last
 
     def run(self) -> None:

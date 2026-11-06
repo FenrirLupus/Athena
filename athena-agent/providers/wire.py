@@ -22,9 +22,42 @@ Adapting a provider therefore means translating **in** and **out**, and the adap
 from __future__ import annotations
 
 import json
+import sys
+from pathlib import Path
 
 
 # -- helpers ---------------------------------------------------------------
+
+def _caller(depth: int = 2) -> str:
+    """`file.py:line in function` for the site that recorded a line, not the helper that wrote it."""
+    try:
+        frame = sys._getframe(depth)
+    except ValueError:
+        return "?"
+    return f"{Path(frame.f_code.co_filename).name}:{frame.f_lineno} in {frame.f_code.co_name}"
+
+
+def _t(name: str, level: str = "debug", **fields) -> None:
+    """Emit a wire line in the calling adapter's lane, when a trace is running.
+
+    Resolved lazily and defensively: this module must stay importable on its own (the offload runtime loads the
+    parser without an adapter package), and tracing must never be the reason a request fails.
+    """
+    try:
+        from core import trace
+    except ImportError:                               # noqa: BLE001 — no repo root, no trail
+        return
+    if not trace.enabled(level):
+        return
+    # `where=` names the site that made the decision, not this helper: the trace records a frame for every line
+    fields.setdefault("where", _caller())
+    try:
+        from providers.base import scope_fields
+        fields = {**scope_fields(), **fields}
+    except Exception:                                 # noqa: BLE001 — a wire helper must not need the adapter
+        pass
+    trace.event(name, level=level, **fields)
+
 
 def join_endpoint(base_url: str, path: str, *, version: str = "/v1") -> str:
     """Join a base URL and an endpoint without doubling a version segment.
@@ -35,11 +68,15 @@ def join_endpoint(base_url: str, path: str, *, version: str = "/v1") -> str:
     """
     base = (base_url or "").rstrip("/")
     if not base:
+        _t("wire.endpoint", level="error", shape="refused", rule="empty base_url", path=path)
         raise ValueError("empty base_url")
     if base.endswith("/v1") or base.endswith("/v1beta"):
+        _t("wire.endpoint", level="trace", shape="versioned", path=path)
         return base + path
     if "/v1/" in base:               # e.g. a proxy that already carries the version mid-path
+        _t("wire.endpoint", level="trace", shape="mid-path", path=path)
         return base + path
+    _t("wire.endpoint", level="trace", shape="appended", version=version, path=path)
     return base + version + path
 
 
@@ -76,6 +113,9 @@ def to_openai(messages: list[dict]) -> list[dict]:
             if not entry["content"]:
                 entry["content"] = None         # OpenAI rejects "" alongside tool_calls
         out.append(entry)
+    _t("wire.openai.request", messages=len(messages), sent=len(out),
+       tool_calls=sum(len(m.get("tool_calls") or []) for m in out),
+       tool_results=sum(1 for m in out if m.get("role") == "tool"))
     return out
 
 
@@ -92,16 +132,21 @@ def from_openai(data: dict) -> dict:
                 args = json.loads(raw) if raw.strip() else {}
             except json.JSONDecodeError:
                 args = {"_raw": raw}
+                _t("wire.openai.rejected", level="error", rule="arguments not JSON", tool=fn.get("name") or "",
+                   chars=len(raw))
         else:
             args = raw or {}
         calls.append({"id": tc.get("id") or f"call_{i}",
                       "name": fn.get("name") or "",
                       "arguments": args})
     usage = data.get("usage") or {}
+    finish = choice.get("finish_reason") or ("tool_calls" if calls else "stop")
+    _t("wire.openai.response", calls=len(calls), chars=len(msg.get("content") or ""),
+       finish_reason=finish, choices=len(data.get("choices") or []), usage=bool(usage))
     return {
         "content": msg.get("content") or "",
         "tool_calls": calls,
-        "finish_reason": choice.get("finish_reason") or ("tool_calls" if calls else "stop"),
+        "finish_reason": finish,
         "usage": usage,
         "cost_usd": 0.0,
     }
@@ -112,13 +157,18 @@ def from_openai(data: dict) -> dict:
 def tools_to_anthropic(tools: list[dict] | None) -> list[dict]:
     """OpenAI function schemas -> Anthropic tool definitions."""
     out = []
+    skipped = 0
     for tool in tools or []:
         fn = tool.get("function") if tool.get("type") == "function" else tool
         if not isinstance(fn, dict) or not fn.get("name"):
+            skipped += 1                              # a nameless schema is not a tool: Anthropic would 400
             continue
         out.append({"name": fn["name"],
                     "description": fn.get("description") or "",
                     "input_schema": fn.get("parameters") or {"type": "object", "properties": {}}})
+    if skipped:
+        _t("wire.anthropic.tool.skipped", level="error", rule="no function name", skipped=skipped,
+           tools=len(tools or []))
     return out
 
 
@@ -132,12 +182,15 @@ def to_anthropic(messages: list[dict]) -> tuple[str, list[dict]]:
     """
     system_parts: list[str] = []
     turns: list[dict] = []
+    merges = 0
 
     def push(role: str, blocks: list[dict]) -> None:
+        nonlocal merges
         if not blocks:
             return
         if turns and turns[-1]["role"] == role:
             turns[-1]["content"].extend(blocks)     # merge: Anthropic forbids two turns in a row
+            merges += 1
         else:
             turns.append({"role": role, "content": list(blocks)})
 
@@ -165,14 +218,20 @@ def to_anthropic(messages: list[dict]) -> tuple[str, list[dict]]:
             continue
         push("user", [{"type": "text", "text": _text_of(msg)}])
 
-    return "\n\n".join(p for p in system_parts if p.strip()), turns
+    system = "\n\n".join(p for p in system_parts if p.strip())
+    _t("wire.anthropic.request", messages=len(messages), turns=len(turns), merged=merges,
+       system_chars=len(system), system_parts=len(system_parts),
+       tool_use=sum(1 for t in turns for b in t["content"] if b.get("type") == "tool_use"),
+       tool_results=sum(1 for t in turns for b in t["content"] if b.get("type") == "tool_result"))
+    return system, turns
 
 
 def from_anthropic(data: dict) -> dict:
     """Anthropic message response -> the internal response shape."""
     text_parts: list[str] = []
     calls: list[dict] = []
-    for block in data.get("content") or []:
+    blocks = data.get("content") or []
+    for block in blocks:
         kind = block.get("type")
         if kind == "text":
             text_parts.append(block.get("text") or "")
@@ -183,7 +242,12 @@ def from_anthropic(data: dict) -> dict:
     stop = data.get("stop_reason") or ""
     finish = {"tool_use": "tool_calls", "end_turn": "stop",
               "max_tokens": "length", "stop_sequence": "stop"}.get(stop, stop or "stop")
+    if stop and stop not in ("tool_use", "end_turn", "max_tokens", "stop_sequence"):
+        # an unmapped stop reason reaches the loop verbatim, which reads as a completed turn
+        _t("wire.anthropic.stop.unmapped", level="error", rule="unknown stop_reason", stop_reason=stop)
     usage = data.get("usage") or {}
+    _t("wire.anthropic.response", blocks=len(blocks), text=len(text_parts), calls=len(calls),
+       stop_reason=stop, finish_reason=finish)
     return {
         "content": "".join(text_parts),
         "tool_calls": calls,

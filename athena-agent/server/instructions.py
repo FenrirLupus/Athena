@@ -10,20 +10,35 @@ Every rule survives — identity deference, persistence, honesty, tool disciplin
 mention contract (syntax, queue-not-blocking, idle-vs-busy, address only listed names).
 """
 
+from __future__ import annotations
+
+from core import trace
+
+LANE = "prompt"
+
+
+def _block(name: str, text: str) -> str:
+    """One prompt block, reported by name and size — this text is re-sent on every model call, so its size is the
+    property worth seeing. The text itself is never a field."""
+    trace.event("prompt.block", level="debug", channel=LANE, block=name,
+                chars=len(text), bytes=len(text.encode("utf-8")))
+    return text
+
+
 # The identity is the profile's, not this string's: a channel whose ASSISTANT.md says "I am Scout" must not be
 # told "You are Athena" by the instructions — the model then answers as the wrong agent (measured: scout
 # replied in Athena's voice when the prompt named Athena and the identity file named Scout).
-HIVE_INSTRUCTIONS = (
+HIVE_INSTRUCTIONS = _block("hive", (
     "Hand work to another agent by writing @name: <question> in your reply. It queues on their channel and "
     "they answer when free — you are not blocked meanwhile. Prefer an IDLE peer for work that should start "
     "now; a BUSY one queues behind its current task. Address only these names. Peers: {roster}."
-)
+))
 
-DEFAULT_INSTRUCTIONS = (
+DEFAULT_INSTRUCTIONS = _block("default", (
     "You are the agent in your identity block — that name, that role, that voice. You persist: your own "
     "thread, your own memory. Answer directly and honestly. Call a tool only for a fact you lack; short "
     "messages like *kisses* or 'hi' are conversation, so answer in your own voice, not with a tool. "
-    "A Git repository URL is an intake request, not a task: call repo_inspect, follow the repo-intake skill, "
+    "A Git repository URL is an intake request, not a task: call repo(action='inspect'), follow the repo-intake skill, "
     "and propose an installation shape — never install one yourself. "
     "Never claim work you did not do."
-)
+))

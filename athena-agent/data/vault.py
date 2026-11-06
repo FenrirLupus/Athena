@@ -9,7 +9,7 @@ from __future__ import annotations
 import sqlite3
 import threading
 from pathlib import Path
-from core import timefmt
+from core import timefmt, trace
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS messages (
@@ -21,11 +21,13 @@ CREATE TABLE IF NOT EXISTS messages (
     ts          TEXT,
     tool_call_id TEXT,
     name        TEXT,
-    created     TEXT NOT NULL
+    created     TEXT NOT NULL,
+    uid         TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_messages_channel ON messages(channel);
 CREATE INDEX IF NOT EXISTS idx_messages_snapshot ON messages(snapshot);
 CREATE INDEX IF NOT EXISTS idx_messages_created ON messages(created);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_uid ON messages(channel, uid);
 """
 
 
@@ -59,27 +61,77 @@ class Vault:
             columns = {row[1] for row in conn.execute("PRAGMA table_info(messages)")}
         except sqlite3.DatabaseError:
             return
+        if not columns:
+            return                                  # a fresh database: the schema below creates it with uid
+        if "uid" not in columns:
+            conn.execute("ALTER TABLE messages ADD COLUMN uid TEXT")
+        # existing rows have no identity: derive it from the row itself, then enforce uniqueness
+        for row in conn.execute("SELECT id, channel, ts, role, content FROM messages WHERE uid IS NULL").fetchall():
+            conn.execute("UPDATE messages SET uid=? WHERE id=?",
+                         (Vault.identity(row[1], row[2], row[3], row[4]), row[0]))
         if "lane" in columns and "channel" not in columns:
             try:
                 conn.execute("ALTER TABLE messages RENAME COLUMN lane TO channel")
                 conn.execute("DROP INDEX IF EXISTS idx_messages_lane")
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_channel ON messages(channel)")
-            except sqlite3.DatabaseError:
-                pass
+            except sqlite3.DatabaseError as exc:
+                # an un-renamed vault keeps working but every `WHERE channel` query reads nothing from it
+                trace.failure("vault.migrate.failed", exc, channel="vault",
+                              columns=sorted(columns), step="rename lane→channel")
+            else:
+                trace.event("vault.migrate", level="info", channel="vault", step="rename lane→channel",
+                            columns=sorted(columns))
+
+    @staticmethod
+    def identity(channel: str, ts, role: str, content: str) -> str:
+        """One row's identity: the same message seen twice is one row, however it arrived."""
+        import hashlib
+        raw = f"{channel}|{ts or ''}|{role or ''}|{content or ''}"
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
     def insert_messages(self, messages: list[dict], snapshot: str) -> int:
-        """Copy a batch of turns into the vault. Returns how many rows were written."""
+        """Copy a batch of turns into the vault. Returns how many rows were written.
+
+        A row that is not a message is refused and named — inserting it would put a hole in the vault that the
+        count still reports as a row. A duplicate is idempotent but never silent: `written` and `ignored` are
+        both in the trace line, because "the vault has the turns" is only true when they match.
+        """
         if not messages:
+            return 0
+        good: list[dict] = []
+        for index, m in enumerate(messages):
+            if not isinstance(m, dict) or not str(m.get("role") or "").strip():
+                trace.event("vault.row.refused", level="error", channel=self.channel, snapshot=snapshot,
+                            index=index, reason="not a message with a role")
+                continue
+            good.append(m)
+        if not good:
             return 0
         now = timefmt.stamp()
         rows = [(self.channel, snapshot, m.get("role", ""), m.get("content", "") or "",
-                 m.get("ts"), m.get("tool_call_id"), m.get("name"), now)
-                for m in messages]
-        with self._lock:
-            with self._conn() as conn:
-                conn.executemany(
-                    "INSERT INTO messages (channel, snapshot, role, content, ts, tool_call_id, name, created)"
-                    " VALUES (?,?,?,?,?,?,?,?)", rows)
+                 m.get("ts"), m.get("tool_call_id"), m.get("name"), now,
+                 self.identity(self.channel, m.get("ts"), m.get("role", ""), m.get("content", "")))
+                for m in good]
+        nbytes = sum(len(str(r[3]).encode("utf-8")) for r in rows)
+        try:
+            with self._lock:
+                with self._conn() as conn:
+                    cur = conn.executemany(
+                        "INSERT OR IGNORE INTO messages"
+                        " (channel, snapshot, role, content, ts, tool_call_id, name, created, uid)"
+                        " VALUES (?,?,?,?,?,?,?,?,?)", rows)
+                    written = cur.rowcount if cur.rowcount is not None and cur.rowcount >= 0 else len(rows)
+        except sqlite3.Error as exc:
+            # the copy is the durable half of a compression: a failure here is a true loss, not a retry
+            trace.failure("vault.append.lost", exc, channel=self.channel, snapshot=snapshot,
+                          rows=len(rows), bytes=nbytes, path=str(self.path))
+            raise
+        trace.event("vault.append", level="debug", channel=self.channel, snapshot=snapshot,
+                    rows=len(rows), written=written, ignored=len(rows) - written, bytes=nbytes)
+        if written < len(rows):
+            trace.event("vault.append.ignored", level="info", channel=self.channel, snapshot=snapshot,
+                        rows=len(rows), written=written, rows_skipped=len(rows) - written,
+                        reason="duplicate identity — the row is already in the vault")
         return len(rows)
 
     def count(self) -> int:

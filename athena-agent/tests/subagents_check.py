@@ -16,7 +16,7 @@ import _boot  # noqa: F401 — puts the project root on sys.path
 
 from core import paths, subagents
 from providers.mock import MockProvider
-from tools import registry as registry_mod
+from tools import loader, registry as registry_mod
 from tools import subagents as subagent_tools
 
 checks = {}
@@ -91,13 +91,13 @@ with tempfile.TemporaryDirectory() as td:
     ctx = type("C", (), {})()
     ctx.scope, ctx.cfg, ctx.profile_root, ctx.athena_root = scope, cfg, home, athena
     ctx.provider, ctx.is_subagent, ctx.approvals = MockProvider(), False, None
-    tools = {t.name: t.fn for t in subagent_tools.build(ctx)}
-    checks["spawn_tool_exists_for_an_agent"] = "spawn_subagent" in tools
+    tools = loader.action_map(subagent_tools.build, ctx)
+    checks["spawn_tool_exists_for_an_agent"] = "spawn" in tools
 
     ctx.is_subagent = True
-    worker_tools = {t.name: t.fn for t in subagent_tools.build(ctx)}
+    worker_tools = loader.action_map(subagent_tools.build, ctx)
     try:
-        worker_tools["spawn_subagent"](task="nested")
+        worker_tools["spawn"](task="nested")
         checks["worker_refuses_to_spawn"] = False
     except Exception as exc:                      # noqa: BLE001
         checks["worker_refuses_to_spawn"] = "cannot spawn workers" in str(exc)

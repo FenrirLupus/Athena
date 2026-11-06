@@ -12,6 +12,15 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+for _parent in Path(__file__).resolve().parents:            # the tree that holds core/
+    if (_parent / "core" / "trace.py").is_file():
+        if str(_parent) not in sys.path:
+            sys.path.insert(0, str(_parent))
+        break
+from core import trace
+
+LANE = "build"
+
 ROOT = Path(__file__).resolve().parents[1]
 WEB = ROOT / "web"
 SRC = WEB / "src"
@@ -41,14 +50,18 @@ def build_one(name: str) -> str:
 def main(argv: list[str]) -> int:
     check = "--check" in argv
     changed = []
-    for name, target in TARGETS.items():
-        new = build_one(name)
-        old = target.read_text(encoding="utf-8") if target.exists() else ""
-        if new == old:
-            continue
-        changed.append(name)
-        if not check:
-            target.write_text(new, encoding="utf-8")
+    # one pair for the whole run: the entry says what was asked, the exit says what the drift check found and wrote
+    with trace.span("pages.build", channel=LANE, mode="check" if check else "write", pages=len(TARGETS)) as sp:
+        for name, target in TARGETS.items():
+            new = build_one(name)
+            old = target.read_text(encoding="utf-8") if target.exists() else ""
+            if new == old:
+                continue
+            changed.append(name)
+            if not check:
+                target.write_text(new, encoding="utf-8")
+        sp.ok(pages=len(TARGETS), written=0 if check else len(changed), changed=changed,
+              verdict=("drift" if changed else "clean") if check else ("built" if changed else "no changes"))
     if check:
         if changed:
             print("would change: " + ", ".join(changed))

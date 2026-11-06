@@ -25,6 +25,24 @@ import os
 import time
 from pathlib import Path
 
+try:
+    from core import trace
+except ImportError:                                   # run as a script from providers/: repo root is not on the path
+    import sys as _sys
+    _sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    try:
+        from core import trace
+    except ImportError:                               # tracing is never the reason a runtime fails to start
+        class _NoTrace:
+            @staticmethod
+            def event(*_a, **_k): return None
+            @staticmethod
+            def failure(*_a, **_k): return None
+            @staticmethod
+            def enabled(*_a, **_k): return False
+        trace = _NoTrace()
+
+LANE = "runtime"
 STARTED_AT = time.time()
 
 # Tool calls arrive in whatever encoding the model's chat template taught it. All of these are real:
@@ -63,6 +81,10 @@ def budgets(plan: dict) -> dict:
     gpu = max(0, int(hw["vram_free"] * plan.get("gpu_fill", 0.90) * 0.5) - 256 * 1024 ** 2)
     cpu = max(0, int(hw["ram_available"] * plan.get("ram_fill", 0.75)) - 768 * 1024 ** 2)
     disk = max(0, int(hw["disk_free"] * 0.5))
+    trace.event("runtime.budgets", level="debug", channel=LANE,
+                gpu_gib=round(gpu / 1024 ** 3, 2), cpu_gib=round(cpu / 1024 ** 3, 2),
+                disk_gib=round(disk / 1024 ** 3, 2), kv_gib=round(kv / 1024 ** 3, 2),
+                gpu_fill=plan.get("gpu_fill"), ram_fill=plan.get("ram_fill"))
     return {"gpu": gpu, "cpu": cpu, "disk": disk, "kv": kv}
 
 
@@ -132,6 +154,8 @@ def promote_layers(model, count: int) -> dict:
     try:
         from accelerate.hooks import remove_hook_from_module
     except Exception:                                 # noqa: BLE001 — accelerate is optional for this path
+        trace.event("runtime.promote", level="error", channel=LANE, promoted=0, requested=count,
+                    rule="accelerate hooks unavailable")
         return {"promoted": 0, "total": 0, "requested": count, "error": "accelerate hooks unavailable"}
     import torch
     layers = _decoder_layers(model)
@@ -170,6 +194,10 @@ def promote_layers(model, count: int) -> dict:
                 # print the PROJECTED figure too: "1768 MiB free, reserve 1600" looks like a bug, because the
                 # decision is about free AFTER the move (1768 - 264 = 1504 < 1600), not free before it
                 skipped["reserve"] += 1
+                trace.event("runtime.promote", level="debug", channel=LANE, promoted=promoted,
+                            requested=count, rule="reserve", free_mib=round(free / 1024 ** 2),
+                            need_mib=round(layer_bytes / 1024 ** 2),
+                            reserve_mib=round(reserve / 1024 ** 2))
                 print(f"[offload] promotion stopped at {promoted}: {free / 1024**2:.0f} MiB free now, "
                       f"{layer_bytes / 1024**2:.0f} MiB needed, would leave "
                       f"{(free - layer_bytes) / 1024**2:.0f} MiB (reserve {reserve / 1024**2:.0f} MiB)",
@@ -179,8 +207,11 @@ def promote_layers(model, count: int) -> dict:
             layer.to("cuda:0")
             promoted += 1
         except Exception as exc:                      # noqa: BLE001 — OOM here just stops promotion
+            trace.failure("runtime.promote", exc, channel=LANE, promoted=promoted, requested=count)
             print(f"[offload] promotion stopped after {promoted}: {type(exc).__name__}: {exc}", flush=True)
             break
+    trace.event("runtime.promote", level="debug", channel=LANE, promoted=promoted, layers=len(layers),
+                requested=count, skipped=skipped)
     print(f"[offload] promoted {promoted}/{len(layers)} CPU layers to the GPU (requested {count}); "
           f"skipped: {skipped}", flush=True)
     return {"promoted": promoted, "total": len(layers), "requested": count}
@@ -221,6 +252,11 @@ def load_tiered(model_dir: str, plan: dict, offload_folder: Path):
     max_memory: dict = {0: b["gpu"], "cpu": b["cpu"]}
     if needs_disk:
         max_memory["disk"] = b["disk"]
+    trace.event("runtime.tiers", level="debug", channel=LANE, needs_disk=needs_disk,
+                disk_layers=len(plan["tiers"]["disk"]["layers"]),
+                weights_gib=round(weights_total / 1024 ** 3, 2),
+                cpu_gib=round(b["cpu"] / 1024 ** 3, 2),
+                rule="disk layers or weights exceed the cpu budget" if needs_disk else "fits in gpu+cpu")
     print(f"[offload] disk tier: {'offered' if needs_disk else 'not needed'} "
           f"(weights {weights_total / 1024 ** 3:.2f} GiB vs cpu budget {b['cpu'] / 1024 ** 3:.2f} GiB)",
           flush=True)
@@ -242,12 +278,19 @@ def load_tiered(model_dir: str, plan: dict, offload_folder: Path):
             model = cls.from_pretrained(model_dir, **kwargs)
             hf = getattr(model, "hf_device_map", None) or {}
             from collections import Counter
+            trace.event("runtime.loaded", level="debug", channel=LANE, loader=cls.__name__,
+                        modules=len(hf),
+                        devices=",".join(sorted({str(v) for v in hf.values()})) or "-")
             print(f"[offload] loaded with {cls.__name__}; devices "
                   f"{dict(Counter(str(v) for v in hf.values()))}", flush=True)
             return model
         except (TypeError, ValueError, OSError, RuntimeError) as exc:
             last_error = exc
+            trace.event("runtime.loader", level="debug", channel=LANE, loader=cls.__name__,
+                        rule="refused", exc=type(exc).__name__)
             continue
+    trace.failure("runtime.load", None, channel=LANE, model=Path(model_dir).name,
+                  reason=f"no loader could place this model: {last_error}")
     raise RuntimeError(f"no loader could place this model: {last_error}")
 
 
@@ -259,6 +302,7 @@ def normalise_messages(messages: list[dict]) -> list[dict]:
     once a tool call is in the history, which is why the first turn works and the second does not.
     """
     out = []
+    repaired = rejected = 0
     for message in messages:
         message = dict(message)
         calls = message.get("tool_calls")
@@ -275,12 +319,18 @@ def normalise_messages(messages: list[dict]) -> list[dict]:
                         arguments = json.loads(arguments) if arguments.strip() else {}
                     except json.JSONDecodeError:
                         arguments = {"_raw": arguments}
+                        rejected += 1
+                    else:
+                        repaired += 1
                 fn["arguments"] = arguments if isinstance(arguments, dict) else {"_raw": arguments}
                 call["function"] = fn
                 call.setdefault("type", "function")
                 fixed.append(call)
             message["tool_calls"] = fixed
         out.append(message)
+    if repaired or rejected:
+        trace.event("runtime.tool_calls", level="debug", channel=LANE, messages=len(messages),
+                    string_arguments=repaired, rejected=rejected)
     return out
 
 
@@ -321,13 +371,21 @@ def build_app(model_dir: str, plan_path: str, served_name: str):
     plan = json.loads(Path(plan_path).read_text(encoding="utf-8"))
     offload_folder = Path(plan_path).parent / "offload"
     offload_folder.mkdir(parents=True, exist_ok=True)
+    trace.event("runtime.cold_start", level="info", channel=LANE, model=Path(model_dir).name,
+                served=served_name, cold_s=round(time.time() - STARTED_AT, 2),
+                tiers={k: len(v.get("layers") or []) for k, v in (plan.get("tiers") or {}).items()},
+                promote=int(os.environ.get("ATHENA_PROMOTE_LAYERS") or plan.get("promote_layers") or 0))
 
     tokenizer = AutoTokenizer.from_pretrained(model_dir, trust_remote_code=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
+    trace.event("runtime.tokenizer", level="debug", channel=LANE, vocab=getattr(tokenizer, "vocab_size", 0),
+                cold_s=round(time.time() - STARTED_AT, 2))
 
     model = load_tiered(model_dir, plan, offload_folder)
     model.eval()
+    trace.event("runtime.model_ready", level="info", channel=LANE, model=Path(model_dir).name,
+                cold_s=round(time.time() - STARTED_AT, 2))
 
     # steady-state promotion, opt-in: the load budget is halved for the allocator warmup, which no longer
     # applies once the model is resident. 0 (the default) keeps the previous behaviour exactly.
@@ -343,8 +401,15 @@ def build_app(model_dir: str, plan_path: str, served_name: str):
 
     app = FastAPI(title="athena offload runtime", version=_version.text())
 
+    first_hit = {"at": None}
+
     @app.get("/health")
     def health():
+        if first_hit["at"] is None:
+            first_hit["at"] = time.time()
+            trace.event("runtime.bound", level="info", channel=LANE, served=served_name,
+                        cold_s=round(first_hit["at"] - STARTED_AT, 2),
+                        note="first health probe; the port is answering")
         return {"status": "ok", "served_name": served_name,
                 "pid": os.getpid(),
                 "started_at": STARTED_AT,
@@ -370,10 +435,15 @@ def build_app(model_dir: str, plan_path: str, served_name: str):
         # others anywhere. Athena can produce a stray system turn (a recorded API failure, for example),
         # so merge every system message into the leading one instead of letting the template 500.
         roles = [m.get("role") for m in messages]
+        trace.event("runtime.request", level="debug", channel=LANE, messages=len(messages),
+                    tools=len(tools or []), max_tokens=max_new, temperature=temperature,
+                    stream=bool(body.get("stream")), roles=",".join(roles))
         if "system" in roles[1:]:
             head = "\n\n".join(m.get("content") or "" for m in messages if m.get("role") == "system")
             rest = [m for m in messages if m.get("role") != "system"]
             messages = [{"role": "system", "content": head}] + rest
+            trace.event("runtime.prompt_repair", level="debug", channel=LANE, rule="stray system turn",
+                        roles=",".join(roles))
             print(f"[offload] merged stray system turns; roles were {roles}", flush=True)
 
         messages = normalise_messages(messages)
@@ -384,13 +454,19 @@ def build_app(model_dir: str, plan_path: str, served_name: str):
             text = tokenizer.apply_chat_template(
                 messages, tools=tools, add_generation_prompt=True, tokenize=False, **think)
         except TypeError:
+            trace.event("runtime.template", level="debug", channel=LANE, rule="kwargs refused",
+                        retry="tools, no template kwargs")
             text = tokenizer.apply_chat_template(
                 messages, tools=tools, add_generation_prompt=True, tokenize=False)
         except ValueError:
+            trace.event("runtime.template", level="debug", channel=LANE, rule="tools refused",
+                        retry="prose only", tools=len(tools or []))
             text = tokenizer.apply_chat_template(
                 messages, add_generation_prompt=True, tokenize=False)
             tools = None                              # template cannot render tools; answer in prose
         except Exception as exc:                      # noqa: BLE001 — report, do not 500 blindly
+            trace.failure("runtime.template", exc, channel=LANE, roles=",".join(roles),
+                          messages=len(messages))
             print(f"[offload] template error: {type(exc).__name__}: {exc} | roles={roles}", flush=True)
             return JSONResponse({"error": {"message": f"{type(exc).__name__}: {exc}",
                                            "roles": roles}}, status_code=400)
@@ -412,6 +488,10 @@ def build_app(model_dir: str, plan_path: str, served_name: str):
         raw = tokenizer.decode(new_tokens, skip_special_tokens=True)
 
         prose, calls = parse_tool_calls(raw)
+        if timer.first:
+            trace.event("runtime.first_token", level="debug", channel=LANE,
+                        prefill_s=round(timer.first - prompt_started, 3),
+                        prompt_tokens=prompt_tokens_measured)
         msg: dict = {"role": "assistant", "content": prose}
         finish = "stop"
         if calls:
@@ -423,6 +503,10 @@ def build_app(model_dir: str, plan_path: str, served_name: str):
         elif len(new_tokens) >= max_new:
             finish = "length"
 
+        trace.event("runtime.reply", level="debug", channel=LANE, calls=len(calls), finish=finish,
+                    completion_tokens=int(new_tokens.shape[-1]),
+                    decode_s=round((time.time() - timer.first), 3) if timer.first else "-",
+                    seconds=round(time.time() - started, 3))
         return JSONResponse({
             "id": f"chatcmpl-{int(started)}",
             "object": "chat.completion",
@@ -455,7 +539,17 @@ def main() -> int:
     args = ap.parse_args()
 
     import uvicorn
-    app = build_app(args.model, args.plan, args.served_name)
+    trace.event("runtime.start", level="info", channel=LANE, model=Path(args.model).name,
+                plan=Path(args.plan).name, served=args.served_name, port=args.port,
+                host=args.host, pid=os.getpid())
+    try:
+        app = build_app(args.model, args.plan, args.served_name)
+    except BaseException as exc:                      # noqa: BLE001 — a runtime that refuses to come up is the event
+        trace.failure("runtime.start", exc, channel=LANE, model=Path(args.model).name,
+                      plan=Path(args.plan).name)
+        raise
+    trace.event("runtime.serve", level="info", channel=LANE, host=args.host, port=args.port,
+                served=args.served_name, cold_s=round(time.time() - STARTED_AT, 2))
     print(f"[offload] serving {args.served_name} on http://{args.host}:{args.port}/v1", flush=True)
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
     return 0

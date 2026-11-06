@@ -14,6 +14,8 @@ from __future__ import annotations
 
 from typing import Iterable
 
+from core import trace
+
 LEVELS = ("warning", "caution", "critical")
 RANK = {"warning": 1, "caution": 2, "critical": 3}
 DEFAULT_SLOW_S = 60.0
@@ -22,14 +24,28 @@ DEFAULT_SLOW_S = 60.0
 def classify(row: dict, slow_s: float = DEFAULT_SLOW_S) -> str:
     """Return the level for one metrics row."""
     if not isinstance(row, dict):
+        # not a row at all: the caller is folding something it does not understand, and a level invented
+        # for it would look like a measured result
+        trace.event("outcome.unknown", level="error", rule="row-is-not-a-mapping",
+                    found=type(row).__name__)
         return "warning"
+    channel = str(row.get("channel") or "")
     if row.get("timed_out") or row.get("abandoned") or row.get("tool_timeout"):
+        trace.event("outcome.classify", level="debug", channel=channel, outcome="caution",
+                    rule="did-not-finish", signal="timeout", seconds=row.get("seconds"))
         return "caution"
     failed = bool(row.get("error")) or row.get("ok") is False or row.get("failed")
     if failed:
+        signal = ("error" if row.get("error") else ("ok-false" if row.get("ok") is False else "failed"))
+        trace.event("outcome.classify", level="debug", channel=channel, outcome="critical",
+                    rule="did-not-finish", signal=signal, error_bytes=len(str(row.get("error") or "")))
         return "critical"
     if row.get("slow") or float(row.get("seconds") or 0.0) > slow_s:
+        trace.event("outcome.classify", level="debug", channel=channel, outcome="warning",
+                    rule="finished-slow", seconds=row.get("seconds"), slow_s=slow_s)
         return "warning"
+    trace.event("outcome.classify", level="trace", channel=channel, outcome="warning",
+                rule="finished-clean", seconds=row.get("seconds"))
     return "warning"
 
 
@@ -44,6 +60,8 @@ def summarise(rows: Iterable[dict], slow_s: float = DEFAULT_SLOW_S) -> dict:
             total += 1
     share = {level: (round(100.0 * n / total, 1) if total else 0.0) for level, n in counts.items()}
     worst = max(counts, key=lambda level: (RANK[level] * 1 if counts[level] else 0)) if total else ""
+    trace.event("outcome.summary", level="info", total=total, worst=worst or "none", counts=counts,
+                slow_s=slow_s)
     return {"total": total, "counts": counts, "share_pct": share, "worst_present": worst}
 
 

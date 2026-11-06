@@ -11,8 +11,7 @@ import _boot  # noqa: F401 — puts the project root on sys.path
 
 from core import plugins as plugins_mod
 from core import skills as skills_mod
-from tools import filesystem, registry as registry_mod
-from tools import skills as skill_tools
+from tools import filesystem, loader, registry as registry_mod
 
 checks = {}
 
@@ -69,10 +68,19 @@ with tempfile.TemporaryDirectory() as td:
         checks["unknown_skill_refused"] = "no skill named" in str(exc) and "shared-one" in str(exc)
 
     # -- the two skill tools reach the same library -----------------------
-    tools = {t.name: t.fn for t in skill_tools.build(home)}
-    listing = tools["skill_list"]()
+    skill_tools = loader.script_module("skills")
+
+    class SkillsCtx:
+        """A context is what a tool script gets: the roots, and the config that decides which plugins count."""
+
+        def __init__(self):
+            self.profile_root, self.athena_root, self.cfg = home, athena, {}
+
+    tools = loader.action_map(skill_tools.build, SkillsCtx())
+
+    listing = tools["list"]()
     checks["skill_list_tool_counts"] = listing["count"] == 4
-    checks["skill_read_tool_opens"] = "profile shadowed" in tools["skill_read"](name="shadowed")["body"]
+    checks["skill_read_tool_opens"] = "profile shadowed" in tools["read"](name="shadowed")["body"]
 
     # -- plugins: off unless named, broken ones skipped -------------------
     good = athena / "plugins" / "good"
@@ -117,8 +125,8 @@ with tempfile.TemporaryDirectory() as td:
     ctx.athena_root = athena
     bound = registry_mod.default_registry({"plugins": {"enabled": ["good"]}}).bind(ctx)
     names = set(bound.names())
-    checks["bound_has_filesystem_tools"] = {"ls", "write", "delete"} <= names
-    checks["bound_has_skill_tools"] = {"skill_list", "skill_read"} <= names
+    checks["bound_has_filesystem_tools"] = "filesystem" in names
+    checks["bound_has_skill_tools"] = "skills" in names
     checks["bound_has_plugin_tools"] = "good_tool" in names
     checks["bound_has_builtins"] = {"echo", "add"} <= names
     checks["every_tool_has_an_object_schema"] = all(

@@ -18,11 +18,21 @@ import argparse
 import inspect
 import io
 import json
+import os
+import signal
+import sys
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+_TREE = Path(__file__).resolve().parents[1]
+if str(_TREE) not in sys.path:                      # `python scripts/tts_server.py` puts scripts/ on the path, not the tree
+    sys.path.insert(0, str(_TREE))
+from core import trace
+
+LANE = "tts"
 _state: dict = {}
+_served = {"requests": 0, "chunks": 0, "bytes": 0, "failures": 0}
 
 
 def _patch_hub() -> None:
@@ -49,7 +59,10 @@ def load_xtts(reference: Path) -> dict:
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     started = time.time()
-    model = TTS("tts_models/multilingual/multi-dataset/xtts_v2").to(device)
+    with trace.span("tts.load", channel=LANE, engine="xtts", model="xtts_v2", device=device,
+                    reference=reference.name) as sp:
+        model = TTS("tts_models/multilingual/multi-dataset/xtts_v2").to(device)
+        sp.ok(seconds=round(time.time() - started, 2))
     return {"engine": "xtts", "model": model, "device": device, "reference": str(reference),
             "sample_rate": 24000, "loaded_s": round(time.time() - started, 2),
             "cls": "TTS/xtts_v2", "kwargs": [], "prompt_text": ""}
@@ -68,9 +81,13 @@ def load_cosyvoice(model_dir: str, reference: Path) -> dict:
         if name in accepted:
             kwargs[name] = value
     started = time.time()
-    model = cls(model_dir, **kwargs)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    with trace.span("tts.load", channel=LANE, engine="cosyvoice", model=Path(model_dir).name,
+                    device=device, cls=cls.__name__) as sp:
+        model = cls(model_dir, **kwargs)
+        sp.ok(seconds=round(time.time() - started, 2), kwargs=sorted(kwargs))
     return {"model": model, "cls": cls.__name__, "kwargs": sorted(kwargs),
-            "device": "cuda" if torch.cuda.is_available() else "cpu",
+            "device": device,
             "loaded_s": round(time.time() - started, 2),
             "reference": str(reference), "sample_rate": int(getattr(model, "sample_rate", 22050))}
 
@@ -118,19 +135,29 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:                                       # noqa: N802
         if not self.path.startswith("/speak"):
+            trace.event("tts.refused", channel=LANE, reason="not found", path=self.path)
             self._json(404, {"ok": False, "error": "not found"})
             return
         length = int(self.headers.get("content-length") or 0)
         try:
             payload = json.loads(self.rfile.read(length) or b"{}")
         except ValueError:
+            trace.event("tts.refused", channel=LANE, reason="body is not JSON", bytes=length)
             self._json(400, {"ok": False, "error": "body must be JSON"})
             return
         text = clean_text(payload.get("text") or "")
         if not text:
+            trace.event("tts.refused", channel=LANE, reason="empty text after clean_text",
+                        raw_chars=len(str(payload.get("text") or "")))
             self._json(400, {"ok": False, "error": "text is required"})
             return
-        started = time.time()
+        with trace.span("tts.speak", channel=LANE, chars=len(text), words=len(text.split()),
+                        engine=_state.get("engine"), json=bool(payload.get("json"))) as sp:
+            self._speak(payload, text, sp, time.time())
+
+    def _speak(self, payload: dict, text: str, sp, started: float) -> None:
+        """Synthesise and answer. One span wraps it, so a failure exits with its frame and a poisoned CUDA
+        context is one readable line before the process exits for a clean restart."""
         try:
             import numpy as np
             import soundfile as sf
@@ -165,8 +192,10 @@ class Handler(BaseHTTPRequestHandler):
                             samples = candidate
                             break
                     if samples is None:
-                        print(json.dumps({"chunk_failed": group[:40], "error": last_error}), flush=True)
+                        trace.event("tts.chunk.failed", level="debug", channel=LANE, chunk=group[:40],
+                                    error=last_error)
                         continue
+                    _served["chunks"] += 1
                     if samples.size:
                         # each clip arrives with its own lead and tail of silence; concatenating them stretches a
                         # sentence to several times its length, so the edges are trimmed to the speech envelope
@@ -183,6 +212,8 @@ class Handler(BaseHTTPRequestHandler):
 
                 if not pieces:
                     # last resort: the whole passage in one call, which is what worked before chunking existed
+                    trace.event("tts.speak.fallback", level="debug", channel=LANE, groups=len(groups),
+                                error=last_error)
                     try:
                         whole = _np.asarray(model.tts(text=text, speaker_wav=_state["reference"], language="en"),
                                             dtype=_np.float32)
@@ -191,6 +222,7 @@ class Handler(BaseHTTPRequestHandler):
                     except Exception as exc:                      # noqa: BLE001
                         last_error = f"{type(exc).__name__}: {exc}"[:200]
                 if not pieces:
+                    sp.failed(RuntimeError(f"no chunk could be synthesised ({last_error})"))
                     self._json(500, {"ok": False, "error": f"no chunk could be synthesised ({last_error})"})
                     return
 
@@ -211,6 +243,9 @@ class Handler(BaseHTTPRequestHandler):
                 if payload.get("json"):
                     self._json(200, {"ok": True, "seconds": round(time.time() - started, 3),
                                      "sample_rate": rate, "samples": int(arr.size), "engine": "xtts"})
+                    _served["requests"] += 1
+                    sp.ok(engine="xtts", samples=int(arr.size), sample_rate=rate, chunks=len(pieces),
+                          seconds=round(time.time() - started, 3))
                     return
                 buffer = io.BytesIO()
                 sf.write(buffer, arr, rate, format="WAV", subtype="PCM_16")
@@ -220,6 +255,10 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_header("content-length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
+                _served["requests"] += 1
+                _served["bytes"] += len(body)
+                sp.ok(engine="xtts", bytes=len(body), sample_rate=rate, chunks=len(pieces),
+                      seconds=round(time.time() - started, 3))
                 return
 
             # A registered speaker (built from every clip in the bank) needs no prompt per call. Falling back to the
@@ -247,6 +286,9 @@ class Handler(BaseHTTPRequestHandler):
             if payload.get("json"):
                 self._json(200, {"ok": True, "seconds": round(time.time() - started, 3), "sample_rate": rate,
                                  "samples": int(audio.shape[1])})
+                _served["requests"] += 1
+                sp.ok(samples=int(audio.shape[1]), sample_rate=rate, speaker="bank" if use_bank else "reference",
+                      seconds=round(time.time() - started, 3))
                 return
             buffer = io.BytesIO()
             sf.write(buffer, audio.squeeze(0).detach().cpu().numpy(), rate, format="WAV", subtype="PCM_16")
@@ -256,16 +298,25 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("content-length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+            _served["requests"] += 1
+            _served["bytes"] += len(body)
+            sp.ok(bytes=len(body), sample_rate=rate, speaker="bank" if use_bank else "reference",
+                  seconds=round(time.time() - started, 3))
         except Exception as exc:                                     # noqa: BLE001
+            _served["failures"] += 1
+            sp.failed(exc)                                           # the ✗ line carries the frame
             message = f"{type(exc).__name__}: {exc}"
-            self._json(500, {"ok": False, "error": message})
             # a CUDA assert leaves the context unusable: exit so the supervisor starts a clean worker instead of
             # answering every later request with the same poisoned error
             if "device-side assert" in message or "CUDA error" in message:
-                import os
-                import sys
+                # one readable line, then die: the HTTP 500 above is all a caller can see, and it says nothing
+                trace.event("tts.worker.fatal", channel=LANE, action="exit", code=3,
+                            why="cuda context is unusable after a device-side assert",
+                            requests=_served["requests"], chunks=_served["chunks"], failures=_served["failures"])
                 sys.stderr.flush()
+                self._json(500, {"ok": False, "error": "tts worker is restarting (cuda context poisoned)"})
                 os._exit(3)
+            self._json(500, {"ok": False, "error": message})
 
     def log_message(self, fmt: str, *args) -> None:
         return
@@ -282,15 +333,19 @@ def main() -> int:
     model_dir = args.model or str(root / "models" / "FunAudioLLM" / "Fun-CosyVoice3-0.5B-2512")
     bank = Path(args.voicebank or (root / "profiles" / "default" / "voicebank"))
     reference = bank / "reference.wav"
+    trace.event("tts.start", channel=LANE, pid=os.getpid(), port=args.port, host="127.0.0.1",
+                bank=bank.name, model=Path(model_dir).name)
     prompt_text = (bank / "reference.txt").read_text(encoding="utf-8").strip() if (bank / "reference.txt").exists() else ""
     if not reference.exists():
+        trace.event("tts.refused", channel=LANE, reason="no reference clip", bank=str(bank))
         print(json.dumps({"ok": False, "error": f"no reference clip in {bank}"}), flush=True)
         return 2
 
-    engine = "xtts"
     try:
         _state.update(load_xtts(reference))
     except Exception as exc:                                    # noqa: BLE001
+        # the fallback is a real decision, and the reason the first engine failed is the thing worth keeping
+        trace.failure("tts.load.failed", exc, channel=LANE, engine="xtts", fallback="cosyvoice")
         print(json.dumps({"xtts_failed": f"{type(exc).__name__}: {exc}", "falling_back": "cosyvoice"}), flush=True)
         _state.update(load_cosyvoice(model_dir, reference))
     _state["prompt_text"] = prompt_text[:400]
@@ -299,7 +354,27 @@ def main() -> int:
     print(json.dumps({"listening": f"http://127.0.0.1:{args.port}", "speaker": _state["speaker"],
                       "cls": _state["cls"], "kwargs": _state["kwargs"], "device": _state["device"],
                       "loaded_s": _state["loaded_s"]}), flush=True)
-    ThreadingHTTPServer(("127.0.0.1", args.port), Handler).serve_forever()
+    server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
+    trace.event("tts.listening", channel=LANE, port=args.port, speaker=_state["speaker"], cls=_state["cls"],
+                device=_state["device"], loaded_s=_state["loaded_s"], sample_rate=_state.get("sample_rate"))
+
+    def _on_term(signum, _frame):
+        trace.event("tts.stop", channel=LANE, reason="signal", signal=signum, requests=_served["requests"],
+                    bytes=_served["bytes"], failures=_served["failures"])
+        raise SystemExit(0)
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            signal.signal(sig, _on_term)
+        except (ValueError, OSError):                           # not the main thread: the default handler stands
+            pass
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        trace.event("tts.stop", channel=LANE, reason="interrupted", requests=_served["requests"],
+                    bytes=_served["bytes"], failures=_served["failures"])
+    finally:
+        server.server_close()
     return 0
 
 

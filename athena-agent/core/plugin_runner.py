@@ -32,6 +32,8 @@ try:
 except OSError:
     pass
 
+from core import trace  # noqa: E402 — after sys.path is repaired, or the import is the thing that fails
+
 
 class ShimRegistry:
     """Collects the plugin's tools instead of running them in the server."""
@@ -62,6 +64,7 @@ def main(argv: list[str] | None = None) -> int:
         _send({"ok": False, "error": "usage: plugin_runner <plugin_dir> <entry.py>"})
         return 2
     plugin_dir, entry = Path(argv[0]), Path(argv[1])
+    trace.event("plugin_runner.start", level="debug", entry=entry.name, dir=plugin_dir.name)
 
     class Ctx:
         cfg: dict = {}
@@ -76,8 +79,11 @@ def main(argv: list[str] | None = None) -> int:
         register = getattr(module, "register", None)
         if not callable(register):
             raise RuntimeError(f"{entry.name} has no register(registry, ctx)")
-        register(registry, Ctx)
+        with trace.span("plugin_runner.register", level="debug", entry=entry.name) as sp:
+            register(registry, Ctx)
+            sp.ok(tools=len(registry.tools))
     except Exception as exc:                          # noqa: BLE001 — reported, not raised
+        trace.failure("plugin_runner.import", exc, entry=entry.name)
         _send({"ok": False, "error": f"{type(exc).__name__}: {exc}",
                "trace": traceback.format_exc(limit=4).splitlines()[-4:]})
         return 1
@@ -97,12 +103,14 @@ def main(argv: list[str] | None = None) -> int:
         name = request.get("call")
         tool = registry.tools.get(name)
         if tool is None:
+            trace.event("plugin_runner.unknown", level="error", entry=entry.name, tool=str(name))
             _send({"ok": False, "result": f"error: no tool named {name!r} in this plugin"})
             continue
         try:
             out = tool.fn(**(request.get("args") or {}))
             _send({"ok": True, "result": out if isinstance(out, str) else json.dumps(out, ensure_ascii=False)})
         except Exception as exc:                      # noqa: BLE001 — a tool error, not a crash
+            trace.failure("plugin_runner.call", exc, entry=entry.name, tool=str(name))
             _send({"ok": False, "result": f"error: {name} failed: {type(exc).__name__}: {exc}"})
     return 0
 

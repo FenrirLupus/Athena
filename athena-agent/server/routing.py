@@ -19,6 +19,7 @@ from typing import Protocol
 
 from core import channelstate
 from core import mentions
+from core import trace
 from server.instructions import DEFAULT_INSTRUCTIONS, HIVE_INSTRUCTIONS
 
 
@@ -65,6 +66,8 @@ class MentionRouter:
                 detail = "asleep" if recorded == channelstate.SLEEPING else (
                     "stale" if recorded in (channelstate.WORKING, channelstate.QUEUED) else recorded)
             rows.append(f"@{name} — {detail}")
+        if trace.enabled("trace"):
+            trace.event("route.roster", level="trace", excluding=exclude, peers=len(rows), live=len(live))
         return "; ".join(rows)
 
     def instructions_for(self, channel) -> str:
@@ -80,14 +83,16 @@ class MentionRouter:
         from core import skills as skills_mod
 
         # a finding the agent cannot see is a finding nobody acts on
+        security = False
         try:
             root = getattr(channel, "root", None)
             report = (root.parents[1] / "security" / "REPORT.md") if root else None
             if report is not None and report.is_file():
                 head = report.read_text(encoding="utf-8")[:400]
                 if "Nothing differs from the baseline" not in head:
+                    security = True
                     text += ("\n\nSECURITY: the red/blue watchdogs have outstanding findings. Call "
-                             "`security_report` before continuing, tell the user what it says, and do not attempt "
+                             "`security(action='report')` before continuing, tell the user what it says, and do not attempt "
                              "repairs yourself.")
         except OSError:
             pass
@@ -109,8 +114,11 @@ class MentionRouter:
         index = skills_mod.index(root_for_skills, athena_root=athena_for_skills,
                                  plugin_names=enabled_for_skills)
         if index:
-            text += ("\n\nSkills available to you (open one with skill_read when the task matches its description):\n"
+            text += ("\n\nSkills available to you (open one with skills(action='read') when the task matches its description):\n"
                      + "\n".join(index))
+        trace.event("route.instructions", level="debug", channel=getattr(channel, "name", ""),
+                    peers=len(peers.split("; ")) if peers else 0, skills=len(index),
+                    security=security, chars=len(text))
         return text
 
     # -- the three-pass exchange ------------------------------------------
@@ -134,8 +142,17 @@ class MentionRouter:
                         asker.awaiting[channel.name] = remaining
                     else:
                         asker.awaiting.pop(channel.name, None)
+            else:
+                # the asker was dropped while its question was in flight: the answer will be refused below
+                trace.event("route.asker", level="debug", channel=channel.name, asker=reply_to,
+                            resident=False)
 
-        if result.get("status") not in ("completed", "exhausted_budget", "exhausted_turns"):
+        status = result.get("status")
+        if status not in ("completed", "exhausted_budget", "exhausted_turns"):
+            # a failed or cancelled turn is not delivered anywhere; without this line the absence of a reply
+            # looks like a routing bug rather than the turn's own outcome
+            trace.event("route.skip", level="debug", channel=channel.name, status=status, hops=hops,
+                        reason="turn status is not deliverable")
             return
 
         # turn 3 · the answer goes back to whoever asked
@@ -143,25 +160,44 @@ class MentionRouter:
             try:
                 registry.enqueue(reply_to, text=(result.get("reply") or "").strip() or "(no reply)",
                                  author=channel.name, hops=hops + 1)
-            except (KeyError, ValueError):
-                pass
+                trace.event("route.reply", level="debug", channel=channel.name, to=reply_to,
+                            hops=hops + 1, chars=len(result.get("reply") or ""))
+            except (KeyError, ValueError) as exc:
+                # the asker is gone or its queue is full: the answer exists and has nowhere to go, which no
+                # other line in the trail would show
+                trace.event("route.reply_lost", level="error", channel=channel.name, to=reply_to,
+                            rule=type(exc).__name__, reason=str(exc)[:160])
 
         # turn 1 · this agent addressed another one
         targets = mentions.find(result.get("reply") or "", known=registry.profiles(), exclude=channel.name)
-        for target in targets:
+        trace.event("route.mentions", level="debug", channel=channel.name, hops=hops,
+                    targets=len(targets), status=status)
+        delivered = 0
+        for index, target in enumerate(targets):
             if hops + 1 > mentions.MAX_HOPS:
+                trace.event("route.hops_capped", level="error", channel=channel.name, target=target,
+                            hops=hops, max_hops=mentions.MAX_HOPS, undelivered=len(targets) - index)
                 break
             question = mentions.question_for(result.get("reply") or "", target)
             try:
                 registry.enqueue(target, text=question, author=channel.name,
                                  hops=hops + 1, reply_to=channel.name)
+                delivered += 1
             except KeyError:
+                trace.event("route.unknown", level="error", channel=channel.name, target=target,
+                            hops=hops, rule="no such profile")
                 continue
             except ValueError as exc:
                 # a mention to a sleeping channel must not vanish: the asker is told, as its own inbound
                 # message, that the delivery failed and why — otherwise it waits forever for an answer
+                trace.event("route.refused", level="error", channel=channel.name, target=target,
+                            hops=hops, rule="enqueue refused", reason=str(exc)[:160])
                 try:
                     registry.enqueue(channel.name, text=f"[delivery failed] {exc}",
                                      author="", hops=hops + 1)
                 except ValueError:
-                    pass
+                    trace.event("route.refused_lost", level="error", channel=channel.name, target=target,
+                                rule="notice refused too", hops=hops)
+        if targets:
+            trace.event("route.delivered", level="debug", channel=channel.name, hops=hops,
+                        delivered=delivered, targets=len(targets))

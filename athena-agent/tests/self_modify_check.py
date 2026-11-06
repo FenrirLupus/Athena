@@ -16,7 +16,7 @@ import _boot  # noqa: F401 — puts the project root on sys.path
 
 from core import approvals as ap
 from core import paths
-from tools import filesystem
+from tools import filesystem, loader
 
 checks = {}
 checks_ran = []
@@ -48,7 +48,7 @@ with tempfile.TemporaryDirectory() as td:
     scope = paths.for_profile(home, athena_root=athena)
     broker = ap.ApprovalBroker(timeout_s=0.5)      # short: if any of these asks, it will also time out
     ctx = filesystem.Context(scope=scope, approvals=broker)
-    tools = {t.name: t.fn for t in filesystem.build(ctx)}
+    tools = loader.action_map(filesystem.build, ctx)
 
     # -- 1. overwrite the turn loop ---------------------------------------
     attempt("write_over_loop_refused",

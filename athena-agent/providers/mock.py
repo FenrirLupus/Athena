@@ -12,6 +12,8 @@ the pricing stays the operator's setting.
 from __future__ import annotations
 
 
+from core import trace
+from providers import base as provider_base
 from providers.base import BaseProvider
 
 
@@ -24,11 +26,14 @@ class MockProvider(BaseProvider):
     def call(self, messages: list[dict], *, tools: list[dict] | None = None,
              max_tokens: int = 1024, temperature: float = 0.7) -> dict:
         result = self._reply(messages, tools, max_tokens)
-        prompt_chars = sum(len(str(m.get("content") or "")) for m in messages)
-        prompt = max(1, prompt_chars // 4)
+        prompts = sum(len(str(m.get("content") or "")) for m in messages)
+        prompt = max(1, prompts // 4)
         completion = max(1, len(str(result.get("content") or "")) // 4)
         result["usage"] = {"prompt_tokens": prompt, "completion_tokens": completion,
                            "total_tokens": prompt + completion}
+        trace.event("model.mock", level="trace", **provider_base.scope_fields(),
+                    provider=self.name, model=self.model_name, messages=len(messages),
+                    tools=len(tools or []), prompt_est=prompt)
         return result
 
     def _reply(self, messages: list[dict], tools: list[dict] | None, max_tokens: int) -> dict:

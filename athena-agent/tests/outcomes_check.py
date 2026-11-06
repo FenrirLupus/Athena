@@ -37,4 +37,7 @@ check("notable excludes fast successes", [n["level"] for n in d["notable"]].coun
 
 print(f"{ok}/{ok + fail}")
 print(f"OUTCOMES: {ok} passed, {fail} failed")
+# an explicit verdict the gate greps for: the "ok/total" ratio carries no verdict word, so a red run
+# could only be caught by its exit code — say PASS/FAIL in words as well.
+print("RESULT:", "FAIL" if fail else "PASS")
 sys.exit(1 if fail else 0)

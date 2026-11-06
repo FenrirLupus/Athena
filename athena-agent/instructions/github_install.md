@@ -26,9 +26,9 @@ Refuse `git@…` and `ssh://` forms: cloning over SSH would spend the user's key
 A message containing `https://github.com/owner/repo` (or any `https://…​.git` link) is an instruction to **run the
 whole intake**, not to discuss whether to start:
 
-1. `repo_inspect` it.
+1. `repo(action="inspect")` it.
 2. Read `INVENTORY.md`; if any red flag in §6 appears, say so plainly and stop — no stage, no prompt.
-3. Otherwise **stage it**: `plugin_stage(name=…, source=…)`, which queues an install request.
+3. Otherwise **stage it**: `plugins(action="stage", name=…, source=…)`, which queues an install request.
 4. The interface then asks the user: **Install / Repair / Uninstall / Cancel**.
 
 You do **not** need a separate "shall I stage it?" turn. Staging is reversible and writes only inside your sandbox; the
@@ -47,7 +47,7 @@ The one thing that is *not* a judgement call: the rails in §2, §5 and §6. You
 ## 1 · Inspect — with the tool, never by hand
 
 ```
-repo_inspect(url="https://github.com/owner/repo")
+repo(action="inspect", url="https://github.com/owner/repo")
 ```
 
 It shallow-clones into `sandbox/repos/<name>/` and writes `INVENTORY.md`. **You do not clone manually, and you do not
@@ -119,7 +119,7 @@ one or two functions as tools. Either way:
 - **you declare its dependencies, you do not install them.** If the adapter imports a library, put it in the manifest:
 
   ```
-  plugin_stage(name="x", source="…", requires="httpx>=0.27, pyyaml")
+  plugins(action="stage", name="x", source="…", requires="httpx>=0.27, pyyaml")
   ```
 
   The installer builds the plugin its **own venv** and installs those packages there, on the user's click, and the
@@ -171,7 +171,7 @@ Installation is the user's act. Your part is to prepare and then verify. What a 
 You stage; the user installs.
 
 ```
-plugin_stage(name="egm", source="sandbox/repos/elephant-goldfish-model/skills", entry="scripts/plugin.py",
+plugins(action="stage", name="egm", source="sandbox/repos/elephant-goldfish-model/skills", entry="scripts/plugin.py",
              description="design-with-review workflow", provides="skills")
 ```
 

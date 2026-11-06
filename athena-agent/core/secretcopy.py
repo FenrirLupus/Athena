@@ -18,6 +18,7 @@ import os
 from pathlib import Path
 
 from core import paths as paths_mod
+from core import trace
 
 
 def _global_secrets(athena_root: Path | None) -> dict:
@@ -67,19 +68,22 @@ def copy_secret(profile_root: Path, athena_root: Path | None, name: str, destina
     guard = scope or paths_mod.for_profile(profile_root, athena_root)
     target = Path(destination).expanduser()
     exists = target.exists()
-    resolved = guard.check(str(target), paths_mod.MODIFY if exists else paths_mod.WRITE, tool="use_secret")
+    # the name and the destination are the audit fact; the value is never a field
+    with trace.span("secret.copy", level="debug", name=wanted, dest=str(target), overwrite=exists) as sp:
+        resolved = guard.check(str(target), paths_mod.MODIFY if exists else paths_mod.WRITE, tool="use_secret")
 
-    resolved.parent.mkdir(parents=True, exist_ok=True)
-    line = f"{wanted}={value}\n"
-    if exists:
-        kept = [ln for ln in resolved.read_text(encoding="utf-8").splitlines()
-                if ln.split("=", 1)[0].strip() != wanted]
-        resolved.write_text("\n".join(kept + [f"{wanted}={value}"]) + "\n", encoding="utf-8")
-    else:
-        resolved.write_text(line, encoding="utf-8")
-    try:
-        os.chmod(resolved, 0o600)        # a file with a key in it is a key file
-    except OSError:
-        pass
+        resolved.parent.mkdir(parents=True, exist_ok=True)
+        line = f"{wanted}={value}\n"
+        if exists:
+            kept = [ln for ln in resolved.read_text(encoding="utf-8").splitlines()
+                    if ln.split("=", 1)[0].strip() != wanted]
+            resolved.write_text("\n".join(kept + [f"{wanted}={value}"]) + "\n", encoding="utf-8")
+        else:
+            resolved.write_text(line, encoding="utf-8")
+        try:
+            os.chmod(resolved, 0o600)        # a file with a key in it is a key file
+        except OSError as exc:               # the file is a key file at whatever mode it got; say which
+            trace.event("secret.chmod.skipped", level="debug", path=str(resolved), error=type(exc).__name__)
+        sp.ok(wrote=str(resolved), bytes=len(line))
     return {"name": wanted, "wrote": str(resolved), "bytes": len(line),
             "note": "the value was copied, never returned — read the destination from a program, not from a prompt"}

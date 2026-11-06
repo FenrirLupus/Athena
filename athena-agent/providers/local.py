@@ -31,7 +31,9 @@ from pathlib import Path
 
 import httpx
 
+from core import trace
 from models import store as model_store
+from providers import base as provider_base
 from providers.base import BaseProvider, ProviderError
 from core.context_window import effective_window
 from core.root import athena_root
@@ -340,11 +342,17 @@ class LocalProvider(BaseProvider):
     def _ensure(self) -> None:
         if self._started:
             return
+        began = time.time()
         base = self.server.start()
         self._inner.base_url = base
         self._inner.model = self.server.served_name()
         self.tools_ok = self.server.supports_tools()
         self._started = True
+        # A cold start is the longest silence in a turn: say it started and how long it took to become warm.
+        trace.event("model.runtime", level="debug", **provider_base.scope_fields(),
+                    provider=self.name, backend=self.server.backend, port=self.server.port,
+                    ctx=self.server.ctx, tools=self.tools_ok,
+                    seconds=round(time.time() - began, 1))
 
     def call(self, messages: list[dict], *, tools: list[dict] | None = None,
              max_tokens: int = 1024, temperature: float = 0.7) -> dict:
@@ -354,12 +362,15 @@ class LocalProvider(BaseProvider):
         try:
             return self._inner.call(messages, tools=send_tools, max_tokens=max_tokens,
                                     temperature=temperature)
-        except Exception:                             # noqa: BLE001 — decide by liveness, not by error text
+        except Exception as exc:                      # noqa: BLE001 — decide by liveness, not by error text
             # `_started` was a one-way flag: once the runtime died (crash, OOM, killed, box restart) this
             # provider kept posting to a dead port and every turn failed with "Connection refused" until the
             # whole server was restarted. If the port is not answering, forget the warm state and retry ONCE.
             if self.server.is_up(0.5):
                 raise                                 # it is alive — the error is real, not a dead runtime
+            trace.event("model.retry", level="debug", **provider_base.scope_fields(),
+                        provider=self.name, attempt=2, of=2, port=self.server.port,
+                        why="runtime not answering — restarting it", exc=f"{type(exc).__name__}: {exc}")
             self._started = False
             self._ensure()
             return self._inner.call(messages, tools=send_tools, max_tokens=max_tokens,

@@ -21,16 +21,23 @@ Four rules, each a way this could otherwise go wrong:
 """
 from __future__ import annotations
 
+import contextvars
 import re
 import sqlite3
 import sys
 import time
 from pathlib import Path
 
+from core import trace
+
 MAX_TASK_CHARS = 4000
 DEFAULT_TURNS = 6
 DEFAULT_USD = 0.05
 DEFAULT_TIMEOUT_S = 300
+
+# Set for the duration of a worker's own turn. The child's registry has no `spawn_subagent`; this is the second
+# lock — "no recursion" enforced in the core rather than hoped for in a toolset.
+_IN_WORKER: contextvars.ContextVar = contextvars.ContextVar("athena_subagent_worker", default=False)
 
 
 def _slug(text: str) -> str:
@@ -72,8 +79,15 @@ class Trace:
                 db.execute(f"INSERT INTO runs ({','.join(fields)}) VALUES ({','.join('?' * len(fields))})", values)
                 db.commit()
         except sqlite3.Error as exc:
-            # the trace is the only record that this work happened; losing it silently means an audit with a hole
-            print(f"subagents: could not record the run ({exc}) — trace at {self.state}", file=sys.stderr)
+            # the trace is the only record that this work happened; losing it silently means an audit with a hole,
+            # so the hole itself is a `✗` with the frame that hit it
+            trace.failure("subagent.record.failed", exc, path=str(self.state),
+                          status=row.get("status"), task_chars=len(str(row.get("task") or "")))
+            if not trace.enabled("error"):
+                # `off` is silent by contract, but this is not a diagnostic — it is the audit record itself failing
+                # to land, and that must not depend on a switch an operator turned off for quiet. One line, no value.
+                print(f"subagents: could not record the run ({exc}) — trace at {self.state}",
+                      file=sys.stderr)
 
     def write_artifact(self, *, task: str, result: dict, scope_notes: str, folder: Path,
                        agent_id: str = "") -> None:
@@ -134,14 +148,12 @@ def spawn(*, parent_scope, parent_cfg, parent_lane: str, parent_root: Path, task
 
     clean = (task or "").strip()[:MAX_TASK_CHARS]
     if not clean:
+        trace.failure("subagent.refused", None, channel=parent_lane, reason="empty task")
         raise ValueError("a subagent needs a task")
+    if _IN_WORKER.get():                              # a worker's own turn cannot fork another: the tree stays a tree
+        trace.failure("subagent.refused", None, channel=parent_lane, reason="a worker cannot spawn workers")
+        raise ValueError("a worker cannot spawn workers")
 
-    folder = Path(parent_root) / "subagents" / _slug(clean)
-    trace = Trace(folder)
-    trace.prepare()
-    scope = narrow_scope(parent_scope, folder)
-
-    started = time.time()
     # DEDUCTED from the turn that is running. The module's `spawn_child` existed and was never called, so an agent
     # could spawn workers for ever, each with its own 6 turns and its own $0.05, on top of its own ceiling. With the
     # parent's remaining money as the child's ceiling and the child's turns charged to the parent, delegating costs
@@ -149,31 +161,57 @@ def spawn(*, parent_scope, parent_cfg, parent_lane: str, parent_root: Path, task
     from core import budget as budget_mod
 
     parent_budget = budget_mod.active(parent_lane)
+    parent_remaining = parent_budget.remaining_usd() if parent_budget is not None else None
+    if parent_budget is not None and parent_remaining <= 0:
+        # a worker with no money burns a turn to discover it, and the folder it leaves behind says nothing
+        trace.failure("subagent.refused", None, channel=parent_lane, reason="the parent turn has no budget left",
+                      cost_usd=round(parent_budget.cost_usd, 6), max_usd=parent_budget.max_usd)
+        raise ValueError("the parent turn has no budget left to give a worker")
+
+    folder = Path(parent_root) / "subagents" / _slug(clean)
+    run = Trace(folder)
+    run.prepare()
+    scope = narrow_scope(parent_scope, folder)
+    worker = f"{parent_lane}/subagent"
+
+    started = time.time()
     if parent_budget is not None:
         budget = parent_budget.spawn_child(allocation=max(1, int(max_turns)),
-                                           usd=min(float(max_usd), parent_budget.remaining_usd()))
+                                           usd=min(float(max_usd), parent_remaining))
     else:                                             # spawned outside a turn (a test, or a script): nothing to carve
         budget = IterationBudget(max_turns=max(1, int(max_turns)), max_usd=float(max_usd), grace_calls=1)
     session = Session(folder.name, folder)
     worker_cfg = dict(parent_cfg)
+    # what was asked and what it was given, before a token is spent: the parent's lane, the worker's size, the share
+    # of the parent's ceiling it took — a spawn that is never mentioned again is the one that ran away
+    trace.event("subagent.spawn", channel=parent_lane, worker=folder.name, task_chars=len(clean),
+                model=str((worker_cfg.get("model") or {}).get("name") or "-"),
+                max_turns=int(max_turns), max_usd=round(float(max_usd), 6),
+                carved_turns=int(getattr(budget, "max_turns", 0)),
+                carved_usd=round(float(getattr(budget, "max_usd", 0.0)), 6),
+                parent_remaining_usd=(round(parent_remaining, 6) if parent_remaining is not None else None))
 
     result: dict
     try:
-        registry = tools_factory(trace, scope)
-        turn = run_turn(
-            channel=f"{parent_lane}/subagent",
-            channel_root=folder,
-            session=session,
-            provider=provider,
-            tools_registry=registry,
-            instructions=(instructions or
-                          "You are a one-shot worker. Do the task, say what you did, and stop. "
-                          "You cannot spawn further workers."),
-            user_text=clean,
-            cfg=worker_cfg,
-            budget=budget,
-            interrupts=None,
-        )
+        registry = tools_factory(run, scope)
+        token = _IN_WORKER.set(True)                  # the worker's own turn: this is what makes recursion refusable
+        try:
+            turn = run_turn(
+                channel=worker,
+                channel_root=folder,
+                session=session,
+                provider=provider,
+                tools_registry=registry,
+                instructions=(instructions or
+                              "You are a one-shot worker. Do the task, say what you did, and stop. "
+                              "You cannot spawn further workers."),
+                user_text=clean,
+                cfg=worker_cfg,
+                budget=budget,
+                interrupts=None,
+            )
+        finally:
+            _IN_WORKER.reset(token)
         usage = getattr(turn, "usage", None) or {}
         result = {"status": getattr(turn, "status", "completed"), "reply": getattr(turn, "reply", ""),
                   "turns": getattr(turn, "turns", 0) or getattr(budget, "turns", 0),
@@ -182,20 +220,40 @@ def spawn(*, parent_scope, parent_cfg, parent_lane: str, parent_root: Path, task
                   "completion_tokens": int(usage.get("completion_tokens") or 0),
                   "cost_usd": getattr(turn, "cost_usd", 0.0) or getattr(budget, "cost_usd", 0.0),
                   "model": ((worker_cfg.get("model") or {}).get("name") or "")}
-        if time.time() - started > timeout_s:
+        seconds = round(time.time() - started, 3)
+        # the worker's own line, on the worker's own lane: status, wall clock and what it spent — the parent's loop
+        # line says what the parent did, which is not the same question
+        trace.event("subagent.turn.end", channel=worker, status=result["status"], seconds=seconds,
+                    turns=result["turns"], tool_calls=result["tool_calls"],
+                    tokens_in=result["prompt_tokens"], tokens_out=result["completion_tokens"],
+                    cost_usd=round(float(result["cost_usd"] or 0.0), 6))
+        if seconds > timeout_s:
             result["note"] = f"over the {timeout_s:.0f}s budget; the turn completed anyway"
+            # a wall clock that was exceeded is a defect even when the answer arrived: the parent had stopped thinking
+            trace.event("subagent.overrun", level="error", channel=worker,
+                        limit_s=float(timeout_s), seconds=seconds)
     except Exception as exc:                          # noqa: BLE001 — a worker fails, the parent does not
+        seconds = round(time.time() - started, 3)
         result = {"status": "error", "error": f"{type(exc).__name__}: {exc}", "turns": 0, "tool_calls": 0,
                   "prompt_tokens": 0, "completion_tokens": 0, "cost_usd": 0.0, "model": ""}
+        # the one line that survives a worker that never answered — with the frame that raised it
+        trace.failure("subagent.failed", exc, channel=worker, seconds=seconds, task_chars=len(clean))
 
-    trace.record(agent_id=str(parent_agent_id or ""),
-                 started_at=started, ended_at=time.time(), task=clean, model=result.get("model", ""),
-                 lane=parent_lane, status=result.get("status", "?"), turns=result.get("turns", 0),
-                 tool_calls=result.get("tool_calls", 0), prompt_tokens=result.get("prompt_tokens", 0),
-                 completion_tokens=result.get("completion_tokens", 0), cost_usd=result.get("cost_usd", 0.0),
-                 note=result.get("note", ""))
-    trace.write_artifact(agent_id=str(parent_agent_id or ""), task=clean, result=result,
-                         scope_notes=f"{scope.home} (writes confined here) · no inherited workspaces · "
-                                     f"budget {max_turns} turns / ${max_usd:.2f}", folder=folder)
-    result.update({"trace": str(folder), "artifact": str(trace.artifact), "state_db": str(trace.state)})
+    run.record(agent_id=str(parent_agent_id or ""),
+               started_at=started, ended_at=time.time(), task=clean, model=result.get("model", ""),
+               lane=parent_lane, status=result.get("status", "?"), turns=result.get("turns", 0),
+               tool_calls=result.get("tool_calls", 0), prompt_tokens=result.get("prompt_tokens", 0),
+               completion_tokens=result.get("completion_tokens", 0), cost_usd=result.get("cost_usd", 0.0),
+               note=result.get("note", ""))
+    run.write_artifact(agent_id=str(parent_agent_id or ""), task=clean, result=result,
+                       scope_notes=f"{scope.home} (writes confined here) · no inherited workspaces · "
+                                   f"budget {max_turns} turns / ${max_usd:.2f}", folder=folder)
+    result.update({"trace": str(folder), "artifact": str(run.artifact), "state_db": str(run.state)})
+    # the collected result, on the parent's lane: what the parent got for what it paid
+    trace.event("subagent.result", channel=parent_lane, worker=folder.name,
+                status=result.get("status"), seconds=round(time.time() - started, 3),
+                reply_chars=len(str(result.get("reply") or "")), turns=result.get("turns", 0),
+                tool_calls=result.get("tool_calls", 0),
+                cost_usd=round(float(result.get("cost_usd") or 0.0), 6),
+                artifact=str(run.artifact), note=result.get("note") or "")
     return result

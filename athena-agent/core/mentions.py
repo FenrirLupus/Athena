@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import re
 
+from core import trace
+
 # An address at a word boundary, either bare (`@scout`) or leading a question (`@scout: …`).
 MENTION_RE = re.compile(r"(?<![\w@])@([A-Za-z0-9][A-Za-z0-9_-]{0,31})")
 
@@ -28,18 +30,41 @@ MAX_HOPS = 3              # ask → answer → receive; a fourth hop risks an ec
 
 
 def find(text: str, known: list[str] | None = None, exclude: str = "") -> list[str]:
-    """Mentioned agent names, in order, de-duplicated, capped — and never the speaker itself."""
+    """Mentioned agent names, in order, de-duplicated, capped — and never the speaker itself.
+
+    The parse decision is traced here; delivery, hops and the queue are traced by the routing that calls this,
+    so a skipped `@name` can still be told apart from one that was accepted and then failed to enqueue.
+    """
     seen, out = set(), []
+    skipped: list[str] = []
+    capped = False
     for match in MENTION_RE.finditer(text or ""):
         name = match.group(1).strip()
-        if not name or name == exclude or name in seen:
+        if not name:
+            continue
+        if name == exclude:
+            skipped.append(f"{name}:self")
+            continue
+        if name in seen:
+            skipped.append(f"{name}:duplicate")
             continue
         if known is not None and name not in known:
-            continue                      # @somefile or @someone-unknown is not an address
+            # @somefile or @someone-unknown is not an address
+            skipped.append(f"{name}:unknown")
+            continue
+        if len(out) >= MAX_MENTIONS:
+            # scanned, not dropped silently: a third address is a broadcast, and the trail says so
+            skipped.append(f"{name}:cap")
+            capped = True
+            continue
         seen.add(name)
         out.append(name)
-        if len(out) >= MAX_MENTIONS:
-            break
+    if out or skipped or capped:
+        fields = dict(names=out, found=len(out), skipped=skipped, skipped_count=len(skipped),
+                      cap=MAX_MENTIONS, capped=capped)
+        if capped:
+            fields["rule"] = "per-reply cap"
+        trace.event("mention.parse", level="debug", **fields)
     return out
 
 

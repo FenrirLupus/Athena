@@ -4,7 +4,7 @@ The agent can inspect a repository and prepare a plugin inside its own sandbox. 
 because `ATHENA_ROOT` is read-only to agents, and that is deliberate: an agent that can install code has a way around
 every rule this architecture has. So installation is a **user command** over something the agent staged:
 
-    agent   repo_inspect → assess → stage into sandbox/staging/<name>/
+    agent   repo(action="inspect") → assess → stage into sandbox/staging/<name>/
     user    ./athena.sh plugins install <name>
     this    validate → copy → hash → enable → smoke → re-baseline
 
@@ -24,6 +24,7 @@ import shutil
 import time
 from pathlib import Path
 from core.jsonio import read_json
+from core import trace
 
 MANIFEST = "PLUGIN.md"
 INSTALL_LOG = "installs.json"
@@ -32,6 +33,28 @@ FORBIDDEN_IN_STAGE = ("node_modules", ".git", "__pycache__", ".venv", "venv")
 
 class InstallError(RuntimeError):
     pass
+
+
+def _stage(stage: str, **fields) -> None:
+    """One line per install stage: what ran, and what it produced — names, counts, verdicts. Never file contents."""
+    target = fields.pop("name", "")
+    if target:
+        fields["plugin"] = target            # `trace.event`'s own first argument is the event name, not a field
+    trace.event(f"install.{stage}", level="info", **fields)
+
+
+def _refused(stage: str, rule: str, name: str = "", why: object = "", **fields) -> None:
+    """A refusal names the rule that refused it: 'it failed' is not a diagnosis, and an operator reads the rule."""
+    trace.event("install.refused", level="error", stage=stage, rule=rule, plugin=name,
+                why=_scrub(why), **fields)
+
+
+_URL_CREDENTIALS = re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)[^/\s:@]+:[^/\s@]+@")
+
+
+def _scrub(text: object) -> str:
+    """A refusal may quote another program's output; a URL carrying user:password is the one shape worth stripping."""
+    return _URL_CREDENTIALS.sub(r"\1[REDACTED]@", str(text))[:300]
 
 
 def _slug(name: str) -> str:
@@ -234,6 +257,7 @@ def prepare_environment(dest: Path, requires: list[str], timeout: float = 300.0)
     import sys
 
     if not requires:
+        _stage("venv", name=Path(dest).name, created=False, packages=0, why="none declared")
         return {"created": False, "packages": [], "reason": "none declared"}
 
     target = Path(dest) / VENV
@@ -242,6 +266,7 @@ def prepare_environment(dest: Path, requires: list[str], timeout: float = 300.0)
         subprocess.run([sys.executable, "-m", "venv", str(target)], check=True,
                        capture_output=True, text=True, timeout=120)
     except Exception as exc:                          # noqa: BLE001
+        _refused("venv", "venv", name=Path(dest).name, why=f"{type(exc).__name__}: {exc}")
         return {"created": False, "packages": [], "error": f"venv creation failed: {type(exc).__name__}: {exc}"}
 
     # Seed the shared stack *after* installing, not before: with the `.pth` in place, `pip freeze` also lists the
@@ -261,6 +286,7 @@ def prepare_environment(dest: Path, requires: list[str], timeout: float = 300.0)
     try:
         done = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired:
+        _refused("venv", "pip-timeout", name=Path(dest).name, why=f"pip timed out after {timeout:.0f}s")
         return {"created": True, "packages": [], "error": f"pip timed out after {timeout:.0f}s"}
     log = (done.stdout or "").splitlines()[-8:]
 
@@ -273,6 +299,8 @@ def prepare_environment(dest: Path, requires: list[str], timeout: float = 300.0)
 
     if done.returncode != 0:
         detail = (done.stderr or done.stdout or "").strip().splitlines()[-1:] or ["unknown error"]
+        _refused("venv", "pip", name=Path(dest).name, why=f"pip install failed: {detail[0][:200]}",
+                 from_lock=from_lock)
         return {"created": True, "packages": installed, "shared_stack": shared, "from_lock": from_lock,
                 "error": f"pip install failed: {detail[0][:200]}", "log": log}
 
@@ -283,6 +311,8 @@ def prepare_environment(dest: Path, requires: list[str], timeout: float = 300.0)
         lock_written = True
 
     shared = _seed_shared_stack(target)
+    _stage("venv", name=Path(dest).name, created=True, packages=len(installed), from_lock=from_lock,
+           lock_written=lock_written, shared_stack=bool(shared))
 
     return {"created": True, "packages": installed, "python": str(python), "log": log,
             "shared_stack": shared, "from_lock": from_lock, "lock_written": lock_written,
@@ -333,16 +363,27 @@ def install(staged: Path, plugins_root: Path, athena_root: Path, *, force: bool 
     staged = Path(staged)
     plugins_root = Path(plugins_root)
     if not staged.is_dir():
+        _refused("request", "no-stage", name=staged.name, why=f"no staged plugin at {staged}")
         raise InstallError(f"no staged plugin at {staged}")
-    manifest = _read_manifest(staged)
+    try:
+        manifest = _read_manifest(staged)
+    except InstallError as exc:
+        _refused("manifest", "manifest", name=staged.name, why=exc)
+        raise
+    _stage("manifest", name=staged.name, provides=manifest.get("provides") or "-",
+           entry=manifest.get("entry") or "-", requires=len(manifest.get("requires") or []))
 
     name = _slug(manifest["name"])
     if name != staged.name:
+        _refused("validate", "name-match", name=name,
+                 why=f"manifest name {name!r} does not match the staged folder {staged.name!r}")
         raise InstallError(f"manifest name {name!r} does not match the staged folder {staged.name!r} — "
                            f"one of them is wrong, and guessing which would be worse than stopping")
 
     dest = plugins_root / name
     if dest.exists() and not force:
+        _refused("validate", "already-installed", name=name, path=str(dest),
+                 why="the plugin folder already exists and --force was not passed")
         raise InstallError(f"{dest} already exists — remove it first, or pass --force to replace it")
 
     backup = None
@@ -352,12 +393,16 @@ def install(staged: Path, plugins_root: Path, athena_root: Path, *, force: bool 
         shutil.move(str(dest), str(backup))
 
     _copy_clean(staged, dest)
+    _stage("copy", name=name, dest=str(dest), replaced=bool(backup))
     try:
         environment = prepare_environment(dest, manifest.get("requires") or [])
         files = _hash_tree(dest)
     except Exception as exc:
         _restore(dest, backup)
+        _refused("prepare", "prepare", name=name, why=str(exc))
         raise InstallError(f"{name} could not be prepared ({exc}); the previous version is back in place") from exc
+    _stage("hash", name=name, files=len(files),
+           bytes=sum((record or {}).get("bytes") or 0 for record in files.values()))
 
     record = {"name": name, "installed_at": int(time.time()), "source": str(staged),
               "declared": {k: manifest.get(k) for k in ("name", "description", "entry", "provides", "requires",
@@ -379,7 +424,9 @@ def install(staged: Path, plugins_root: Path, athena_root: Path, *, force: bool 
             log_path.write_text(json.dumps(existing, indent=1), encoding="utf-8")
         except OSError:
             pass
+        _refused("enable", "config-edit", name=name, why=exc)
         raise InstallError(f"could not enable {name} ({exc}); the install was rolled back") from exc
+    _stage("enable", name=name, state=state, config=str(config_path))
 
     result = {"name": name, "path": str(dest), "files": len(files), "enabled": state,
               "manifest": str(dest / MANIFEST), "install_record": str(log_path),
@@ -406,17 +453,27 @@ def install(staged: Path, plugins_root: Path, athena_root: Path, *, force: bool 
             pass
         result["enabled"] = "rolled back — the declared dependencies could not be installed"
         result["rolled_back"] = True
+        trace.event("install.rolled_back", level="error", stage="venv", rule="dependencies", plugin=name,
+                    why=_scrub(environment.get("error") or "the declared dependencies could not be installed"))
         return result
     if backup:
         result["replaced_backup"] = str(backup)
 
     if smoke:
         result["smoke"] = smoke_test(plugins_root, name, athena_root)
+        _stage("smoke", name=name, loaded=bool(result["smoke"]["loaded"]),
+               tools=len(result["smoke"].get("tools") or []),
+               isolation=result["smoke"].get("isolation") or "-")
         if not result["smoke"]["loaded"]:
             # a plugin that cannot load leaves nothing to keep: disable it and say why, rather than leaving the
             # config pointing at something broken
             _disable_in_config(config_path, name)
             result["enabled"] = "rolled back — the plugin did not load"
+            trace.event("install.rolled_back", level="error", stage="smoke", rule="load", plugin=name,
+                        why=_scrub(result["smoke"].get("error") or "the smoke test did not load the plugin"))
+    outcome = "rolled back" not in str(result.get("enabled") or "")
+    _stage("done", name=name, files=len(files), enabled=result["enabled"], ok=outcome,
+           tools=len((result.get("smoke") or {}).get("tools") or []))
     return result
 
 
@@ -428,6 +485,8 @@ def uninstall(name: str, plugins_root: Path, athena_root: Path) -> dict:
     state = _disable_in_config(config_path, name)
 
     if not dest.is_dir():
+        _stage("uninstall", name=name, removed=False, enabled=state,
+               why="no plugin folder: only the enable line existed")
         return {"name": name, "removed": False, "enabled": state,
                 "note": "no such plugin folder — the enable line is the only thing that existed"}
 
@@ -450,6 +509,8 @@ def uninstall(name: str, plugins_root: Path, athena_root: Path) -> dict:
     if record is not None:
         log_path.write_text(json.dumps(records, indent=1), encoding="utf-8")
 
+    _stage("uninstall", name=name, removed=True, enabled=state, archived=str(retired),
+           files=len(manifest_lines))
     return {"name": name, "removed": True, "enabled": state, "archived_at": str(retired),
             "install_record_removed": record is not None,
             "note": "re-run `./athena.sh security baseline` so the removal is recorded as authorised"}
@@ -519,7 +580,11 @@ def _remember_answer(athena_root: Path, folder: Path, decision: str) -> None:
 def request_tool_install(staged: Path, athena_root: Path, *, reason: str = "", agent: str = "") -> dict:
     """Queue a staged tool pack for the user, the same way a plugin is queued."""
     staged = Path(staged)
-    meta = _read_tool(staged)                      # refuses an unusable stage before anyone is asked
+    try:
+        meta = _read_tool(staged)                     # refuses an unusable stage before anyone is asked
+    except InstallError as exc:
+        _refused("request", "tool-manifest", name=staged.name, why=exc, kind="tool", agent=str(agent or "-"))
+        raise
     import secrets
 
     rid = secrets.token_hex(6)
@@ -529,6 +594,8 @@ def request_tool_install(staged: Path, athena_root: Path, *, reason: str = "", a
                  "declared": meta, "created_at": int(time.time()),
                  "files": sum(1 for p in staged.rglob("*") if p.is_file())}
     _save_pending(athena_root, rows)
+    _stage("request", kind="tool", request=rid, name=rows[rid]["name"], files=rows[rid]["files"],
+           agent=str(agent or "-"), staged=staged.name)
     return {"request": rid, "kind": "tool", "name": rows[rid]["name"],
             "awaiting": "the user is prompted; nothing is installed until they answer"}
 
@@ -538,7 +605,11 @@ def request_install(staged: Path, athena_root: Path, *, source_url: str = "", re
     """Record a staged plugin as *waiting for the user*. Validates the manifest now, so a bad stage is refused
     before a person is bothered with it."""
     staged = Path(staged)
-    manifest = _read_manifest(staged)                 # raises if the stage is unusable
+    try:
+        manifest = _read_manifest(staged)                 # raises if the stage is unusable
+    except InstallError as exc:
+        _refused("request", "manifest", name=staged.name, why=exc, agent=str(agent or "-"))
+        raise
     import secrets
 
     rid = secrets.token_hex(6)
@@ -548,6 +619,8 @@ def request_install(staged: Path, athena_root: Path, *, source_url: str = "", re
                  "created_at": int(time.time()),
                  "files": sum(1 for p in staged.rglob("*") if p.is_file())}
     _save_pending(athena_root, rows)
+    _stage("request", kind="plugin", request=rid, name=rows[rid]["name"], files=rows[rid]["files"],
+           agent=str(agent or "-"), staged=staged.name)
     return {"request": rid, "name": rows[rid]["name"], "files": rows[rid]["files"],
             "awaiting": "the user is prompted in the interface; nothing is installed until they answer"}
 
@@ -609,7 +682,9 @@ def reconcile(athena_root: Path, plugins_root: Path) -> int:
             continue
         try:
             manifest = _read_manifest(folder)
-        except InstallError:
+        except InstallError as exc:
+            trace.event("install.reconcile", level="debug", stage="manifest", plugin=folder.name,
+                        why=_scrub(exc))                   # not a usable plugin stage: no prompt, no noise
             continue                                   # not a usable stage: no prompt, no noise
         state = _install_state(_slug(manifest["name"]), folder, athena_root, plugins_root)
         # An answered stage is not asked again — unless the installed copy has drifted, which is a *new* question
@@ -628,6 +703,7 @@ def reconcile(athena_root: Path, plugins_root: Path) -> int:
         created += 1
     if created:
         _save_pending(athena_root, rows)
+        _stage("reconcile", created=created, staged=len(known) + created)
     return created
 
 
@@ -670,6 +746,8 @@ def resolve_install(rid: str, decision: str, athena_root: Path, plugins_root: Pa
         raise KeyError(rid)
     staged_for_answer = Path(row["staged"])
     verdict = (decision or "").strip().lower()
+    trace.event("install.answer", level="info", request=rid, decision=verdict or "-",
+                plugin=row.get("name"), kind=row.get("kind") or "install")
     if row.get("kind") == "tool" and verdict in ("uninstall", "remove"):
         rows.pop(rid, None)
         _save_pending(athena_root, rows)
@@ -690,6 +768,7 @@ def resolve_install(rid: str, decision: str, athena_root: Path, plugins_root: Pa
         try:
             result = install_tool(Path(row["staged"]), Path(plugins_root).parent / "tools", athena_root)
         except InstallError as exc:
+            _refused("tool", "tool-install", name=row["name"], why=exc, request=rid)
             return {"id": rid, "decision": "failed", "name": row["name"], "error": str(exc)}
         return {"id": rid, "decision": "installed", **result}
     if verdict in ("cancel", "deny", "denied", "no"):
@@ -725,6 +804,7 @@ def resolve_install(rid: str, decision: str, athena_root: Path, plugins_root: Pa
     try:
         result = install(staged, plugins_root, athena_root, force=force)
     except InstallError as exc:
+        _refused("install", "install", name=row["name"], why=exc, request=rid)
         return {"id": rid, "decision": "failed", "name": row["name"], "error": str(exc),
                 "note": "the request is cleared; fix the problem and ask the agent to stage it again"}
     return {"id": rid, "decision": "installed", **result}
@@ -810,10 +890,14 @@ def install_tool(staged: Path, tools_root: Path, athena_root: Path, *, force: bo
     meta = _read_tool(staged)
     name = _slug(meta["name"])
     if name != staged.name:
+        _refused("tool", "name-match", name=name, kind="tool",
+                 why=f"TOOL.md name {name!r} does not match the staged folder {staged.name!r}")
         raise InstallError(f"TOOL.md name {name!r} does not match the staged folder {staged.name!r}")
 
     dest = tools_root / name
     if dest.exists() and not force:
+        _refused("tool", "already-installed", name=name, kind="tool", path=str(dest),
+                 why="the tool folder already exists and --force was not passed")
         raise InstallError(f"{dest} already exists — remove it first, or pass --force")
     _copy_clean(staged, dest)
     files = _hash_tree(dest)
@@ -837,10 +921,15 @@ def install_tool(staged: Path, tools_root: Path, athena_root: Path, *, force: bo
     from core import toolpacks
 
     report = toolpacks.load_all(cfg, registry, None, athena_root)
+    # the report also carries the required system packages; this row is about the one pack that was just installed
+    installed = [row.get("tool") for row in report["loaded"] if row.get("name") == name]
+    _stage("tool", name=name, files=len(files), enabled=state, tools=len(installed),
+           skipped=len(report.get("skipped") or []))
     return {"name": name, "kind": "tool", "path": str(dest), "files": len(files), "enabled": state,
-            "tools": [row.get("tool") for row in report["loaded"]],
+            "tools": installed,
             "skipped": report["skipped"], "manifest": str(dest / "TOOL.md"),
             "install_record": str(log_path)}
+
 
 
 # -- box (system) packages ----------------------------------------------------
@@ -880,10 +969,16 @@ def request_box_install(packages, athena_root: Path, *, reason: str = "", agent:
     """Queue a system-package install for the user. Refused outright when the config does not allow it."""
     athena_root = Path(athena_root)
     if not _box_allowed(athena_root):
+        _refused("request", "box-disabled", name="box", kind="box",
+                 why="security.allow_box_installs is not true on this installation")
         raise InstallError("system packages are disabled on this installation — set `security.allow_box_installs: "
                            "true` in config.yaml if you want the box to be changeable at all. A package installed here "
                            "belongs to every plugin and to the server, not to one of them")
-    names = _box_packages(packages)
+    try:
+        names = _box_packages(packages)
+    except InstallError as exc:
+        _refused("request", "package-name", name="box", kind="box", why=exc)
+        raise
     import secrets
 
     rid = secrets.token_hex(6)
@@ -911,8 +1006,11 @@ def install_box(packages, athena_root: Path, *, dry_run: bool = False, timeout: 
     try:
         done = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired:
+        _refused("box", "apt-timeout", name=" ".join(names)[:120], kind="box",
+                 why=f"apt-get timed out after {timeout:.0f}s")
         return {"ok": False, "packages": names, "error": f"apt-get timed out after {timeout:.0f}s"}
     except OSError as exc:
+        _refused("box", "apt-unavailable", name=" ".join(names)[:120], kind="box", why=exc)
         return {"ok": False, "packages": names, "error": f"{type(exc).__name__}: {exc}"}
 
     tail = ((done.stdout or "") + (done.stderr or "")).strip().splitlines()[-12:]
@@ -922,6 +1020,7 @@ def install_box(packages, athena_root: Path, *, dry_run: bool = False, timeout: 
     existing = read_json(log, [])
     existing.append(record)
     log.write_text(json.dumps(existing[-50:], indent=1), encoding="utf-8")
+    _stage("box", packages=len(names), ok=done.returncode == 0, exit=done.returncode, dry_run=dry_run)
     return record
 
 
@@ -961,4 +1060,6 @@ def uninstall_tool(name: str, tools_root: Path, athena_root: Path) -> dict:
     if records.pop(f"tool:{name}", None) is not None:
         log_path.write_text(json.dumps(records, indent=1), encoding="utf-8")
 
+    _stage("uninstall", kind="tool", name=name, removed=True, enabled=state,
+           archived=str(retired), files=len(lines))
     return {"name": name, "kind": "tool", "removed": True, "enabled": state, "archived_at": str(retired)}

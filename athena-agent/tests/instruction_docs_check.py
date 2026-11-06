@@ -62,7 +62,7 @@ checks["install_first_when_both_match"] = [d["name"] for d in both][0] == "githu
 
 rendered = instruction_docs.render("look at https://github.com/a/b")
 checks["render_marks_it_required"] = rendered.startswith("# Required procedure: github_install")
-checks["render_carries_the_steps"] = "repo_inspect" in rendered and "never" in rendered.lower()
+checks["render_carries_the_steps"] = "repo(action=" in rendered and "never" in rendered.lower()
 checks["render_is_empty_without_a_trigger"] = instruction_docs.render("just chatting") == ""
 
 # -- a custom folder, so the loader is not secretly hard-coded -----------------

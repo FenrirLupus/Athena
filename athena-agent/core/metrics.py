@@ -37,7 +37,7 @@ import subprocess
 import threading
 import time
 from pathlib import Path
-from core import timefmt
+from core import timefmt, trace
 from core.jsonio import read_json
 from core import durable
 
@@ -91,21 +91,31 @@ def record(root: Path | str, entry: dict) -> dict:
     # "" not None: a filter comparing against an empty string is a filter, one comparing against null is a bug
     row["agent_id"] = row.get("agent_id") or ""
     row["ts"] = row["ts"] or timefmt.stamp()
-    target = path_for(root, row.get("channel") or "")
-    target.parent.mkdir(parents=True, exist_ok=True)
-    line = json.dumps(row, ensure_ascii=False, default=str)
-    with _LOCK:
-        with open(target, "a", encoding="utf-8") as handle:
-            handle.write(line + "\n")
-            handle.flush()
-            os.fsync(handle.fileno())
+    lane = row.get("channel") or ""
+    try:
+        target = path_for(root, lane)
+    except ValueError as exc:                     # no lane: there is no file this row belongs in
+        trace.failure("metrics.record.refused", exc, channel=lane or "-")
+        raise
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        line = json.dumps(row, ensure_ascii=False, default=str)
+        with _LOCK:
+            with open(target, "a", encoding="utf-8") as handle:
+                handle.write(line + "\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+    except (OSError, TypeError, ValueError) as exc:
+        # the turn spent tokens and seconds whether or not the row landed, so a lost row is a failure, not a gap
+        trace.failure("metrics.record.failed", exc, channel=lane, path=str(target))
+        raise
     # opportunistic retention: the log must not grow without bound, and doing it here means nobody has to
-    # remember a maintenance command. Failure is silent — losing a rollup is better than losing a turn.
+    # remember a maintenance command. Losing a rollup is better than losing a turn — but it is not silent.
     try:
         if target.stat().st_size > ROLLUP_SIZE_BYTES:
-            rollup(root, row.get("channel") or "", keep=ROLLUP_KEEP_ROWS)
-    except (OSError, ValueError):
-        pass
+            rollup(root, lane, keep=ROLLUP_KEEP_ROWS)
+    except (OSError, ValueError) as exc:
+        trace.event("metrics.rollup.skipped", level="debug", channel=lane, error=type(exc).__name__)
     return row
 
 
@@ -115,6 +125,9 @@ def read(root: Path | str, limit: int | None = None, channel: str = "") -> list[
     A torn final line (crash mid-write) is skipped, not fatal.
     """
     targets = [path_for(root, channel)] if channel else profile_dirs(root)
+    if channel and not targets[0].exists():
+        # a lane was named and has no log: either it never recorded a turn, or rows are going somewhere else
+        trace.event("metrics.read.missing", level="debug", channel=channel or "-", path=str(targets[0]))
     rows: list[dict] = []
     for target in targets:
         rows.extend(_read_file(target))
@@ -134,7 +147,12 @@ def _read_file(target: Path) -> list[dict]:
     if not target.exists():
         return []
     rows = []
-    with open(target, "r", encoding="utf-8") as handle:
+    try:
+        handle = open(target, "r", encoding="utf-8")
+    except OSError as exc:                        # exists but unreadable: an empty read would look like "no turns"
+        trace.failure("metrics.read.failed", exc, path=str(target))
+        raise
+    with handle:
         for line in handle:
             line = line.strip()
             if not line:
@@ -349,7 +367,12 @@ def summary(root: Path | str, limit: int | None = None, channel: str = "") -> di
     by_channel: dict[str, list[dict]] = {}
     by_model: dict[str, list[dict]] = {}
     for row in rows:
-        by_channel.setdefault(row.get("_lane") or row.get("channel") or "?", []).append(row)
+        # the breakdown is BY CHANNEL, so the recorded `channel` wins: it is what the log says and what the
+        # reader sees ("channel meter"). `_lane` is an internal identity annotation (the lane's minted id,
+        # stamped in _read_file) and is a uuid here — keying on it printed "channel 2653cdfb-…" in the CLI
+        # table and dropped the real name from the summary entirely. It is only a fallback, for rows written
+        # before the channel field.
+        by_channel.setdefault(row.get("channel") or row.get("_lane") or "?", []).append(row)
         key = f"{(row.get('provider') or '?')}:{row.get('model') or '?'}"
         by_model.setdefault(key, []).append(row)
     archived = _archived_totals(root, channel)

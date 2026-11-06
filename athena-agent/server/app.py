@@ -19,6 +19,7 @@ import json
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse, Response
 
 
@@ -46,6 +47,7 @@ from server.channels import ChannelManager
 from tools import registry as tools_registry
 from core.jsonio import read_json
 from core import durable
+from core import trace
 
 
 class PersonaModel(BaseModel):
@@ -232,6 +234,20 @@ def create_app() -> FastAPI:
 
     app = FastAPI(title="Athena Multiplexer", version=version_mod.text())
 
+    # -- trace: one line in, one line out, for every call -------------------
+    # The request is named by method, path, status and duration only. No cookie, no Authorization header, no
+    # token is read here: a trail that carries a credential is a leak, not a diagnostic. `off` (the default)
+    # costs one comparison and returns the response untouched. Registered below, outside the door.
+    async def _traced_request(request: Request, call_next):
+        if not trace.enabled("debug"):
+            return await call_next(request)
+        with trace.span("http.request", channel="http", method=request.method,
+                        path=request.url.path) as sp:
+            response = await call_next(request)
+            # `status` is the span's own verdict (ok/failed); the HTTP code needs its own name to survive
+            sp.ok(http_status=response.status_code)
+            return response
+
     # the door: every request is classified, and local-only paths are refused to anyone off the loopback
     from core import netdefense as net_mod
 
@@ -245,6 +261,9 @@ def create_app() -> FastAPI:
         token=api_token,
         require_token=bool(net_settings.get("require_token", True)),
     )
+    # After the guard, so this wrapper sits outside it: a request the door refuses is still a request, and a
+    # trail that stops at the first 401 is the trail that hides why the page went blank.
+    app.add_middleware(BaseHTTPMiddleware, dispatch=_traced_request)
     app.state.cfg = cfg
     app.state.managers = managers
     app.state.provider = provider
@@ -383,7 +402,7 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=413, detail="audio is too large")
 
         root_dir = agents_dir.parent
-        runtime = root_dir / "tools" / "voice-runtime" / ".venv" / "bin" / "python"
+        runtime = root_dir / "runtimes" / "voice-runtime" / ".venv" / "bin" / "python"
         script = Path(__file__).resolve().parents[1] / "scripts" / "voice.py"
         if not runtime.exists():
             raise HTTPException(status_code=503, detail="voice runtime is not installed")
@@ -411,8 +430,10 @@ def create_app() -> FastAPI:
                 request_obj = urllib.request.Request(
                     "http://127.0.0.1:8091/transcribe", data=wav.read_bytes(),
                     headers={"content-type": "audio/wav"})
-                with urllib.request.urlopen(request_obj, timeout=60) as response:
-                    payload = json.loads(response.read().decode("utf-8"))
+                with trace.span("voice.transcribe", channel=channel, port=8091, backend="resident") as sp:
+                    with urllib.request.urlopen(request_obj, timeout=60) as response:
+                        payload = json.loads(response.read().decode("utf-8"))
+                    sp.ok(http_status=200, chars=len(str(payload.get("text") or "")))
                 payload["channel"] = channel
                 payload["path"] = "resident"
                 return payload
@@ -435,7 +456,20 @@ def create_app() -> FastAPI:
     _call_workers: dict = {}
 
     def _spawn_worker(name: str, port: int, python: Path, script: Path, extra: list[str],
-                      extra_env: dict | None = None) -> dict:
+                      extra_env: dict | None = None, lane: str = "") -> dict:
+        """Start a voice engine, traced with its interpreter, port, state and load time."""
+        runtime = next((part.name for part in python.parents if part.name.endswith("-runtime")), "")
+        with trace.span("worker.spawn", channel=lane or "voice", worker=name, port=port,
+                        python=python.name, runtime=runtime) as sp:
+            result = _load_worker(name, port, python, script, extra, extra_env)
+            detail = {"state": result.get("state")}
+            if result.get("code") is not None:
+                detail["code"] = result["code"]
+            sp.ok(**detail)
+            return result
+
+    def _load_worker(name: str, port: int, python: Path, script: Path, extra: list[str],
+                     extra_env: dict | None = None) -> dict:
         """Start a worker if its port is not already answering, then wait for it to report healthy."""
         import subprocess
         import time
@@ -496,19 +530,19 @@ def create_app() -> FastAPI:
         results = {}
 
         def run_asr():
-            return _spawn_worker("asr", 8091, root_dir / "tools" / "voice-runtime" / ".venv" / "bin" / "python",
+            return _spawn_worker("asr", 8091, root_dir / "runtimes" / "voice-runtime" / ".venv" / "bin" / "python",
                                  Path(__file__).resolve().parents[1] / "scripts" / "asr_server.py",
-                                 ["--port", "8091"])
+                                 ["--port", "8091"], lane=lane)
 
         def run_tts():
             return _spawn_worker("tts", 8092,
-                                 root_dir / "tools" / "xtts-runtime" / ".venv" / "bin" / "python",
+                                 root_dir / "runtimes" / "xtts-runtime" / ".venv" / "bin" / "python",
                                  Path(__file__).resolve().parents[1] / "scripts" / "tts_server.py",
                                  ["--port", "8092", "--voicebank", str(bank)],
                                  # the package is a source tree, not an installed module: it needs to be on the path.
                                  # CUDA_VISIBLE_DEVICES="" keeps the voice on the CPU so the 8 GB card belongs to
                                  # whisper — the two engines then cannot fight over memory.
-                                 {})
+                                 {}, lane=lane)
 
         results["asr"] = run_asr()
         results["tts"] = run_tts()          # sequential on purpose: two model loads on one GPU contend
@@ -538,24 +572,29 @@ def create_app() -> FastAPI:
             "http://127.0.0.1:8092/speak", data=voice_payload,
             headers={"content-type": "application/json"})
         try:
-            with urllib.request.urlopen(request_obj, timeout=180) as response:
-                body = response.read()
-                kind = response.headers.get("content-type", "audio/wav")
+            with trace.span("voice.speak", channel=channel, port=8092, chars=len(text)) as sp:
+                with urllib.request.urlopen(request_obj, timeout=180) as response:
+                    body = response.read()
+                    kind = response.headers.get("content-type", "audio/wav")
+                sp.ok(http_status=200, chars=len(text), bytes=len(body))
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", "replace")[:300]
             if "device-side assert" in detail or "CUDA error" in detail:
                 # the worker killed itself to shed a poisoned CUDA context; bring a fresh one up and try once more
                 try:
                     _spawn_worker("tts", 8092,
-                                  agents_dir.parent / "tools" / "xtts-runtime" / ".venv" / "bin" / "python",
+                                  agents_dir.parent / "runtimes" / "xtts-runtime" / ".venv" / "bin" / "python",
                                   Path(__file__).resolve().parents[1] / "scripts" / "tts_server.py",
-                                  ["--port", "8092", "--voicebank", str(agents_dir / channel / "voicebank")], {})
+                                  ["--port", "8092", "--voicebank", str(agents_dir / channel / "voicebank")], {},
+                                  lane=channel)
                     retry_obj = urllib.request.Request(
                         "http://127.0.0.1:8092/speak", data=voice_payload,
                         headers={"content-type": "application/json"})
-                    with urllib.request.urlopen(retry_obj, timeout=180) as retry:
-                        body = retry.read()
-                        kind = retry.headers.get("content-type", "audio/wav")
+                    with trace.span("voice.speak", channel=channel, port=8092, attempt=2) as sp:
+                        with urllib.request.urlopen(retry_obj, timeout=180) as retry:
+                            body = retry.read()
+                            kind = retry.headers.get("content-type", "audio/wav")
+                        sp.ok(http_status=200, chars=len(text), bytes=len(body))
                     return Response(content=body, media_type=kind if kind.startswith("audio") else "audio/wav")
                 except Exception as second:
                     raise HTTPException(status_code=503,

@@ -19,6 +19,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from core import trace
+
 SEMVER = re.compile(r"^(?P<major>0|[1-9]\d*)\.(?P<minor>0|[1-9]\d*)\.(?P<patch>0|[1-9]\d*)$")
 CHANNELS = ("alpha", "beta", "stable")
 VERSION_FILE = Path(__file__).resolve().parents[1] / "VERSION"
@@ -65,6 +67,8 @@ def check(release_channel: str | None = None) -> dict:
     if release_channel and release_channel != derived:
         raise VersionError(f"version {version} is {derived}, not {release_channel}: bump the digit that matches the "
                            f"channel (x.0.0 stable, 0.x.0 beta, 0.0.x alpha)")
+    trace.event("version.check", level="debug", version=version, channel=derived,
+                asked=release_channel or "", file=str(VERSION_FILE))
     return {"version": version, "channel": derived}
 
 

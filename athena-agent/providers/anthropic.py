@@ -19,6 +19,8 @@ import json
 
 import httpx
 
+from core import trace
+from providers import base as provider_base
 from providers import wire
 from providers.base import BaseProvider, ProviderError, api_key
 
@@ -71,10 +73,16 @@ class AnthropicProvider(BaseProvider):
              max_tokens: int = 1024, temperature: float = 0.7) -> dict:
         url, headers, payload = self.build_request(
             messages, tools=tools, max_tokens=max_tokens, temperature=temperature)
+        scope = provider_base.scope_fields()
+        trace.event("model.http", level="trace", **scope, provider=self.name, model=self.model,
+                    endpoint=self.base_url, messages=len(payload.get("messages") or []),
+                    tools=len(payload.get("tools") or []), stream=False)
         try:
             with httpx.Client(timeout=self.timeout) as client:
                 resp = client.post(url, headers=headers, json=payload)
         except httpx.HTTPError as exc:
+            trace.event("model.http.failed", level="debug", **scope, provider=self.name,
+                        model=self.model, exc=f"{type(exc).__name__}: {exc}")
             raise ProviderError(f"request failed: {exc}") from exc
 
         if resp.status_code >= 400:
@@ -84,11 +92,15 @@ class AnthropicProvider(BaseProvider):
                 detail = (body.get("error") or {}).get("message") or detail
             except (json.JSONDecodeError, AttributeError):
                 pass
+            trace.event("model.http.rejected", level="debug", **scope, provider=self.name,
+                        model=self.model, status=resp.status_code, detail=detail[:200])
             raise ProviderError(f"HTTP {resp.status_code}: {detail}")
 
         try:
             data = resp.json()
         except json.JSONDecodeError as exc:
+            trace.event("model.http.nonjson", level="debug", **scope, provider=self.name,
+                        model=self.model, status=resp.status_code, body=resp.text[:200])
             raise ProviderError(f"non-JSON response: {resp.text[:200]}") from exc
 
         return wire.from_anthropic(data)

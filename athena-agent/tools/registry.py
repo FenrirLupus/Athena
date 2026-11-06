@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import threading
 from pathlib import Path
+from core import trace
 from core.root import athena_root
 
 # Tools may read what an agent was given, and nothing else. Attachments land in
@@ -40,6 +41,7 @@ class Registry:
         self._tools: dict[str, Tool] = {}
         self._lock = threading.Lock()
         self.max_result_bytes = int(max_result_bytes)
+        self.channel = ""                 # the lane this registry is bound to; "" until `bind` says otherwise
 
     # -- registration ------------------------------------------------------
     def register(self, tool: Tool) -> None:
@@ -64,11 +66,34 @@ class Registry:
 
     # -- invocation --------------------------------------------------------
     def invoke(self, name: str, arguments: dict, timeout: float = 60.0) -> str:
-        """Run a tool and ALWAYS return a string — a refusal is information for the model."""
+        """Run a tool and ALWAYS return a string — a refusal is information for the model.
+
+        The one place a tool call is entered, so it is the one place the trace wraps it: `→ tool.call` with the
+        tool name and the *names* of the arguments (never their values — one of them may be a credential), then
+        `← tool.call` with status, ms and the size of what the model got back. A tool that raises is recorded as
+        a failure with the exception and the tool name, and still returns its error string as before.
+        """
+        lane = self.channel or "-"
+        keys = sorted(str(key) for key in (arguments or {}))
+        with trace.span("tool.call", channel=lane, tool=name, args=keys, timeout=timeout) as sp:
+            text, extra = self._invoke(name, arguments, timeout, lane, keys)
+            exc = extra.pop("exc", None)
+            if exc is not None:
+                # the exit of a failed call is the ✗ line: status=failed with the exception and the frame that
+                # raised it. A failure is recorded at `error` even when this span's own lines are below the level.
+                sp.failed(exc)
+            else:
+                sp.ok(bytes=len(text), **extra)
+        return text
+
+    def _invoke(self, name: str, arguments: dict, timeout: float, lane: str,
+                keys: list[str]) -> tuple[str, dict]:
+        """The call itself: returns (what the model sees, facts for the exit line). Never changes the string."""
         with self._lock:
             tool = self._tools.get(name)
         if tool is None:
-            return f"error: unknown tool {name!r}; available: {', '.join(self.names()) or 'none'}"
+            return (f"error: unknown tool {name!r}; available: {', '.join(self.names()) or 'none'}",
+                    {"refused": "unknown tool"})
         # The timeout is enforced here, not merely accepted. A Python thread cannot be killed, so a call that
         # overruns is ABANDONED: the lane answers with an error instead of blocking for ever on its only worker.
         # That is the difference between one hung tool and a dead channel.
@@ -84,80 +109,47 @@ class Registry:
         worker.start()
         worker.join(timeout if timeout and timeout > 0 else None)
         if worker.is_alive():
-            return (f"error: {name} did not finish within {timeout:.0f}s. The call was abandoned so this agent can "
-                    f"keep working; it may still be running in the background.")
+            trace.event("tool.abandoned", level="info", channel=lane, tool=name, timeout_s=timeout)
+            return ((f"error: {name} did not finish within {timeout:.0f}s. The call was abandoned so this agent can "
+                     f"keep working; it may still be running in the background."),
+                    {"abandoned": True, "timeout_s": float(timeout or 0)})
         if "err" in outcome:
             exc = outcome["err"]
+            # the tool's name and the exception travel with the exit line: a failure is a frame, not a guess
             if isinstance(exc, TypeError):
-                return f"error: bad arguments for {name}: {exc}"
-            return f"error: {name} failed: {type(exc).__name__}: {exc}"
+                return f"error: bad arguments for {name}: {exc}", {"exc": exc}
+            return (f"error: {name} failed: {type(exc).__name__}: {exc}", {"exc": exc})
         out = outcome.get("out", "")
         text = out if isinstance(out, str) else json.dumps(out, ensure_ascii=False)
         if len(text) > self.max_result_bytes:
             text = text[:self.max_result_bytes] + f"\n[truncated at {self.max_result_bytes} bytes]"
-        return text
+            return text, {"truncated": True}
+        return text, {}
 
 
     def bind(self, ctx) -> "Registry":
-        """A registry for one agent: the built-ins plus the filesystem tools, all checked against `ctx.scope`.
+        """A registry for one agent: the primitives plus every package the loader finds, bound to `ctx.scope`.
 
         A new object rather than a mutated one — the manager is shared by every channel, and a per-agent scope
         stored on the shared registry would be whichever agent happened to be built last.
+
+        There is no list of tools here any more. `tools.loader` discovers `TOOL.md` packages across the program, the
+        home and the profile, imports each script by path, and reports what it skipped; a tool that is not a package
+        is not a tool.
         """
-        from tools import filesystem
+        from tools import loader
 
         clone = Registry(max_result_bytes=self.max_result_bytes)
         clone.cfg = getattr(self, "cfg", {})
+        # what the trace calls this lane: the agent bound here, never a caller's claim — so a line can be
+        # attributed to the channel whose turn produced it without threading a name through every call
+        clone.channel = _lane_name(ctx)
         for tool in getattr(self, "_builtins", []):
             clone.register(tool)
-        for tool in filesystem.build(ctx):
-            clone.register(tool)
-
-        # skills: which ones this agent can see depends on its profile, so they are bound here too
-        from tools import skills as skill_tools
 
         profile_root = getattr(ctx, "profile_root", None)
         athena_root_ctx = getattr(ctx, "athena_root", None)
-        enabled_plugins = [str(n) for n in (((getattr(ctx, "cfg", None) or {}).get("plugins") or {})
-                                            .get("enabled") or [])]
-        for tool in skill_tools.build(profile_root, athena_root_ctx, enabled_plugins):
-            clone.register(tool)
-
-        # environment requests: the agent asks for a tool pack; the user's click installs it
-        from tools import envrequest as env_tools
-
-        for tool in env_tools.build(ctx):
-            clone.register(tool)
-
-        # installation: the agent stages a plugin in its sandbox; a human runs the installer
-        from tools import pluginstage as stage_tools
-
-        for tool in stage_tools.build(ctx):
-            clone.register(tool)
-
-        # repository intake: clone into the sandbox, inventory it, run none of it
-        from tools import repo as repo_tools
-
-        for tool in repo_tools.build(ctx):
-            clone.register(tool)
-
-        # delegation: a bounded worker with its own folder and no ability to delegate further
-        from tools import subagents as subagent_tools
-
-        for tool in subagent_tools.build(ctx):
-            clone.register(tool)
-
-        # the watchdogs' findings, readable by the agent that has to act on them
-        from tools import security as security_tools
-
-        for tool in security_tools.build(athena_root_ctx):
-            clone.register(tool)
-
-        # references: the added information a skill, tool or plugin carries
-        from tools import library as library_tools
-
-        for tool in library_tools.build(profile_root, athena_root_ctx):
-            clone.register(tool)
+        clone.pack_report = loader.load(clone, ctx=ctx, profile_root=profile_root, athena_root=athena_root_ctx)
 
         # plugins: only the ones named in `plugins.enabled`, and a broken one is reported not raised
         from core import plugins as plugins_mod
@@ -175,12 +167,16 @@ class Registry:
             except Exception:                      # noqa: BLE001 — an unreadable lane config is not fatal
                 lane_cfg = None
         clone.plugin_report = plugins_mod.load_all(cfg_now, clone, profile_root, athena_root, lane_cfg=lane_cfg)
-
-        # tool packs: user-authored verbs declared in .athena/tools/<name>/tool.yaml
-        from core import toolpacks as packs_mod
-
-        clone.pack_report = packs_mod.load_all(cfg_now, clone, profile_root, athena_root, ctx=ctx)
         return clone
+
+
+def _lane_name(ctx) -> str:
+    """The lane label a trace uses for a bound registry: the channel's name, else its profile folder."""
+    name = str(getattr(ctx, "channel", "") or "")
+    if name:
+        return name
+    root = getattr(ctx, "profile_root", None)
+    return Path(root).name if root else "-"
 
 
 def _scoped_path(raw: str, root: Path | None = None) -> Path | None:

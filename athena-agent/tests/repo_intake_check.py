@@ -21,7 +21,17 @@ from pathlib import Path
 import _boot  # noqa: F401 — puts the project root on sys.path
 
 from core import paths
-from tools import filesystem, repo
+from tools import filesystem, loader
+
+def _load_sandbox():
+    import importlib.util
+    path = PATH_TOOLS / "system" / "sandbox" / "scripts" / "sandbox.py"
+    spec = importlib.util.spec_from_file_location("sandbox_script", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+PATH_TOOLS = __import__("pathlib").Path(__file__).resolve().parent.parent / "tools"
 
 checks = {}
 
@@ -63,16 +73,16 @@ with tempfile.TemporaryDirectory() as td:
     ctx.cfg = {"tools": {"enabled": True}}
     ctx.profile_root, ctx.athena_root = home, athena
 
-    tool = {t.name: t.fn for t in repo.build(ctx)}["repo_inspect"]
+    tool = loader.action_map(_load_sandbox().build, ctx)["inspect"]
 
     # -- parsing ---------------------------------------------------------
-    checks["https_parses"] = repo.parse_repo("https://github.com/owner/repo")["name"] == "repo"
-    checks["dot_git_suffix_parses"] = repo.parse_repo("https://github.com/owner/repo.git")["owner"] == "owner"
-    checks["local_path_parses"] = repo.parse_repo(str(source))["kind"] == "local"
+    checks["https_parses"] = _load_sandbox().parse_repo("https://github.com/owner/repo")["name"] == "repo"
+    checks["dot_git_suffix_parses"] = _load_sandbox().parse_repo("https://github.com/owner/repo.git")["owner"] == "owner"
+    checks["local_path_parses"] = _load_sandbox().parse_repo(str(source))["kind"] == "local"
 
     def refused(raw):
         try:
-            repo.parse_repo(raw)
+            _load_sandbox().parse_repo(raw)
             return False
         except Exception:
             return True
@@ -109,7 +119,7 @@ with tempfile.TemporaryDirectory() as td:
     checks["next_step_points_at_the_skill"] = "repo-intake" in out["next"]
 
     # -- the guard still governs the destination ------------------------
-    outside = repo.parse_repo(str(source))
+    outside = _load_sandbox().parse_repo(str(source))
     checks["local_source_requires_existing_dir"] = outside["kind"] == "local"
 
 for name, passed in checks.items():

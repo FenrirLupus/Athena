@@ -89,7 +89,7 @@ config/     defaults.yaml + loader (defaults-under-user merge, validation)
 core/       budget, turn loop, session
 context/    prompt stack assembly, sized as percentages of the window
 providers/  adapter interface, mock, OpenAI-compatible
-tools/      registry + built-ins
+tools/      registry + loader; one package per tool under tools/system/
 server/     channels (queues, workers) and the HTTP surface
 cli/        entry point
 athena.sh   launchers — resolve .venv from their own location

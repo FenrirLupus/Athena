@@ -15,7 +15,8 @@ for t in version_check identity_check permissions_check approval_check self_modi
          tools_skills_plugins toolpacks_check sandbox_and_budget_check outcomes_check subagents_check \
          instruction_docs_check \
          plugin_isolation_check plugins_safety_check admission_check idle_sleep waking_state \
-         routing_check lifecycle_check config_parity lane_plugins_check updater_check ledger_view_check context_window_check comment_style_check publish_safety_check web_assets_check timefmt_check pages_build_check; do
+         routing_check lifecycle_check config_parity lane_plugins_check updater_check ledger_view_check context_window_check comment_style_check publish_safety_check web_assets_check timefmt_check pages_build_check metrics_check memory_check curator_flow_check curator_concurrency_check home_capabilities_check curator_safety_check vault_tiering_check sql_tools_check \
+         system_tools_check references_check repo_intake_check trace_check; do
   log="$logdir/$t.log"
   timeout 600 "$PY" "tests/$t.py" >"$log" 2>&1
   code=$?

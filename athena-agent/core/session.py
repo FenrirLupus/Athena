@@ -4,7 +4,7 @@ Layout (documentation/architecture/15-session-storage.md):
 
     sessions/LATEST.jsonl                    the live window — appended as turns arrive
     sessions/session_<date>_<time>.jsonl     a snapshot of the turns that left the window
-    sessions/storage/vault.db                copy of every evicted turn, written BEFORE the truncate
+    sessions/storage/VAULT.db                copy of every evicted turn, written BEFORE the truncate
     sessions/compression/SUMMARY.md          the digest, derived from the snapshots
     sessions/compression/summary_<date>_<time>.md   the previous digest, archived on each write
 
@@ -26,6 +26,7 @@ from pathlib import Path
 from data.vault import Vault
 from core import timefmt
 from core import durable
+from core import trace
 
 
 def _free_name(directory: Path, stamp: str, suffix: str = ".jsonl", prefix: str = "session_") -> str:
@@ -49,6 +50,20 @@ def _atomic_write(path: Path, lines: list[str]) -> None:
     durable.write_state(path, "".join(lines))
 
 
+def _tokens(messages) -> int:
+    """Approximate prompt size the same way `core/loop.py` does, so the two counts are comparable."""
+    total = 0
+    for message in messages or []:
+        content = message.get("content")
+        if isinstance(content, str):
+            total += len(content)
+        elif isinstance(content, list):
+            for part in content:
+                total += len(str(part.get("text") or "")) if isinstance(part, dict) else len(str(part))
+        total += 8                                  # per-message framing
+    return int(total / 2.5)
+
+
 class Session:
     """One agent's continuous thread: JSONL live file, dated snapshots, vault copy."""
 
@@ -58,7 +73,7 @@ class Session:
         self.dir = self.root / "sessions"
         self.path = self.dir / "LATEST.jsonl"
         self.summary_path = self.root / "sessions" / "compression" / "SUMMARY.md"
-        self.vault = Vault(self.root / "sessions" / "storage" / "vault.db", channel)
+        self.vault = Vault(self.root / "sessions" / "storage" / "VAULT.db", channel)
         self.keep_after_compress = float(keep_after_compress)
         self._lock = threading.Lock()
         self.dir.mkdir(parents=True, exist_ok=True)
@@ -79,12 +94,15 @@ class Session:
                 continue                     # a corrupt tail line costs that line, not the file
         return out
 
-    def _append(self, msg: dict) -> None:
+    def _append(self, msg: dict) -> int:
+        """Append one line to the live window and return how many bytes it wrote."""
         self.dir.mkdir(parents=True, exist_ok=True)
+        line = json.dumps(msg, ensure_ascii=False) + "\n"
         with open(self.path, "a", encoding="utf-8") as fh:
-            fh.write(json.dumps(msg, ensure_ascii=False) + "\n")
+            fh.write(line)
             fh.flush()
             os.fsync(fh.fileno())
+        return len(line.encode("utf-8"))
 
     # -- api ---------------------------------------------------------------
     def add(self, role: str, content: str, **extra) -> dict:
@@ -93,7 +111,19 @@ class Session:
         msg.update({k: v for k, v in extra.items() if v is not None})
         with self._lock:
             self.messages.append(msg)
-            self._append(msg)
+            try:
+                written = self._append(msg)
+            except OSError as exc:
+                # the turn is in memory and not on disk: say so, with the size, before the caller sees the raise
+                trace.failure("session.write.failed", exc, channel=self.channel, role=role,
+                              messages=len(self.messages), bytes=len(str(content or "")),
+                              path=str(self.path))
+                raise
+        fields = {"channel": self.channel, "role": role, "messages": len(self.messages),
+                  "bytes": written}
+        if extra.get("turn") is not None:
+            fields["turn"] = extra["turn"]
+        trace.event("session.append", level="debug", **fields)
         return msg
 
     def add_tool_result(self, tool_call_id: str, name: str, content: str) -> dict:
@@ -153,40 +183,55 @@ class Session:
         """Move the oldest `evict_count` turns out of the live window, losing nothing."""
         with self._lock:
             total = len(self.messages)
-            evict_count = max(0, min(int(evict_count), total))
+            requested = int(evict_count)
+            evict_count = max(0, min(requested, total))
             if evict_count == 0:
+                trace.event("session.compress.skipped", channel=self.channel, messages=total,
+                            requested=requested, reason="nothing to evict")
                 return {"evicted": 0, "retained": total, "snapshot": None,
                         "vaulted": 0, "summary_written": False, "summary_archived": None}
             evicted = self.messages[:evict_count]
             retained = self.messages[evict_count:]
 
-            # Unique snapshot name: two compressions can land in the same second, and a colliding
-                        # name would overwrite the snapshot taken in the same second, leaving the turns only in the vault.
-            
-            stamp = time.strftime("%Y-%m-%d_%H-%M-%S", time.gmtime())
-            snap = self.dir / _free_name(self.dir, stamp)
+            with trace.span("session.compress", level="info", channel=self.channel,
+                            messages=total, tokens=_tokens(self.messages), evict=evict_count) as sp:
+                # Unique snapshot name: two compressions can land in the same second, and a colliding
+                # name would overwrite the snapshot taken in the same second, leaving the turns only in the vault.
+                stamp = time.strftime("%Y-%m-%d_%H-%M-%S", time.gmtime())
+                snap = self.dir / _free_name(self.dir, stamp)
 
-            # 1 + 2: snapshot durably
-            _atomic_write(snap, [json.dumps(m, ensure_ascii=False) + "\n" for m in evicted])
-            # 3: copy into the vault before anything is destroyed
-            vaulted = self.vault.insert_messages(evicted, snap.stem)
-            # 4: derive the digest
-            digest = ""
-            if digest_fn is not None:
-                try:
-                    # the model digest wants the snapshot name for provenance; the mechanical one takes evicted
+                # 1 + 2: snapshot durably
+                sp.fields["phase"] = "snapshot"
+                _atomic_write(snap, [json.dumps(m, ensure_ascii=False) + "\n" for m in evicted])
+                # 3: copy into the vault before anything is destroyed
+                sp.fields["phase"] = "vault"
+                vaulted = self.vault.insert_messages(evicted, snap.stem)
+                # 4: derive the digest
+                sp.fields["phase"] = "digest"
+                digest = ""
+                if digest_fn is not None:
                     try:
-                        digest = digest_fn(evicted, snap.stem) or ""
-                    except TypeError:
-                        digest = digest_fn(evicted) or ""
-                except Exception:            # noqa: BLE001 — a bad digest must not abort a compression
-                    digest = ""
-            archived_summary = None
-            if digest:
-                archived_summary = self._write_summary(digest, snap.stem, len(evicted))
-            # 5: only now truncate the live window
-            _atomic_write(self.path, [json.dumps(m, ensure_ascii=False) + "\n" for m in retained])
-            self.messages = retained
+                        # the model digest wants the snapshot name for provenance; the mechanical one takes evicted
+                        try:
+                            digest = digest_fn(evicted, snap.stem) or ""
+                        except TypeError:
+                            digest = digest_fn(evicted) or ""
+                    except Exception as exc:     # noqa: BLE001 — a bad digest must not abort a compression
+                        digest = ""
+                        trace.event("session.digest.skipped", level="error", channel=self.channel,
+                                    snapshot=snap.stem, evicted=len(evicted),
+                                    exc=f"{type(exc).__name__}: {exc}")
+                archived_summary = None
+                if digest:
+                    archived_summary = self._write_summary(digest, snap.stem, len(evicted))
+                # 5: only now truncate the live window — a failure here leaves the window intact and the span's
+                # `✗` line names the phase, so the snapshot and vault copy that already exist are never a mystery
+                sp.fields["phase"] = "truncate"
+                _atomic_write(self.path, [json.dumps(m, ensure_ascii=False) + "\n" for m in retained])
+                self.messages = retained
+                sp.fields.pop("phase", None)        # the phase matters on a failure, not on a clean exit
+                sp.ok(retained=len(retained), evicted=len(evicted), tokens_after=_tokens(retained),
+                      vaulted=vaulted, snapshot=snap.name, summary=bool(digest))
 
         return {"evicted": len(evicted), "retained": len(retained), "snapshot": str(snap),
                 "vaulted": vaulted, "summary_written": bool(digest),
@@ -202,7 +247,9 @@ class Session:
             return None
         try:
             current = self.summary_path.read_text(encoding="utf-8")
-        except OSError:
+        except OSError as exc:
+            trace.event("session.summary.unreadable", level="error", channel=self.channel,
+                        path=str(self.summary_path), exc=f"{type(exc).__name__}: {exc}")
             return None
         # nothing but the header: there is no digest to keep yet
         body_lines = [ln for ln in current.splitlines()
@@ -236,14 +283,21 @@ disk and exactly one digest is current."""
     # -- maintenance -------------------------------------------------------
     def clear(self, archive: bool = True) -> None:
         with self._lock:
+            count = len(self.messages)
             if archive and self.path.exists():
                 # exactly the same shape as a compression snapshot — no suffix of any kind. The name is read
                 # by the agent and the operator, so it says when and nothing else.
                 stamp = time.strftime("%Y-%m-%d_%H-%M-%S", time.gmtime())
-                os.replace(self.path, self.dir / _free_name(self.dir, stamp))
+                target = self.dir / _free_name(self.dir, stamp)
+                os.replace(self.path, target)
             elif self.path.exists():
+                target = None
                 self.path.unlink()
+            else:
+                target = None
             self.messages = []
+        trace.event("session.clear", channel=self.channel, messages=count,
+                    archived=str(target) if target else "-")
 
     def snapshots(self) -> list[Path]:
         return sorted(self.dir.glob("session_*.jsonl"))

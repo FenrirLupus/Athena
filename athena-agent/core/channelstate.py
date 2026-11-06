@@ -28,6 +28,7 @@ import time
 from pathlib import Path
 from core.jsonio import read_json
 from core import durable
+from core import trace
 
 FILENAME = "state.json"
 
@@ -72,7 +73,11 @@ def path(profile_root: Path) -> Path:
 def read(profile_root: Path) -> dict:
     """The last recorded state, or {} when there is none (a profile that has never run)."""
     data = read_json(path(profile_root), {})
-    return data if isinstance(data, dict) else {}
+    if not isinstance(data, dict):
+        trace.event("state.unreadable", level="error", channel=Path(profile_root).name,
+                    rule="record-not-a-mapping", found=type(data).__name__)
+        return {}
+    return data
 
 
 def write(profile_root: Path, state: str, **extra) -> dict:
@@ -82,8 +87,10 @@ def write(profile_root: Path, state: str, **extra) -> dict:
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
         durable.write_state(target, json.dumps(record, indent=2))
-    except OSError:
-        pass
+    except OSError as exc:
+        # the transition happened in memory and not on disk: the next reader sees the state before it
+        trace.failure("state.persist.failed", exc, channel=Path(profile_root).name, to=state,
+                      path=str(target))
     return record
 
 
@@ -92,8 +99,14 @@ def recover(profile_root: Path) -> tuple[str, str]:
     record = read(profile_root)
     previous = str(record.get("state") or "")
     if previous in _IN_FLIGHT:
+        trace.event("state.recover", level="info", channel=Path(profile_root).name, was=previous,
+                    to=IDLE, rule="writer-is-gone")
         write(profile_root, IDLE, recovered_from=previous)
         return IDLE, previous
     if previous in (IDLE, ERROR, SLEEPING):
+        trace.event("state.recover", level="debug", channel=Path(profile_root).name, was=previous,
+                    to=previous, rule="carried-over")
         return previous, ""
+    trace.event("state.recover", level="debug", channel=Path(profile_root).name,
+                was=previous or "none", to=AVAILABLE, rule="no-live-record")
     return AVAILABLE, previous

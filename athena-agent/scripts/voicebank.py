@@ -26,11 +26,23 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
+TREE = Path(__file__).resolve().parents[1]           # athena-agent/, which holds core/
 ROOT = Path(__file__).resolve().parents[2]           # <root>/.athena
+if str(TREE) not in sys.path:                        # `python scripts/voicebank.py` puts scripts/ on the path, not the tree
+    sys.path.insert(0, str(TREE))
+from core import trace
+
+LANE = "voicebank"
 PROFILES = ROOT / "profiles"
 AUDIO_SUFFIXES = {".mp3", ".wav", ".m4a", ".flac", ".ogg", ".opus"}
+
+
+def _say(text: str = "") -> None:
+    """The operator's interface: one line per outcome. Diagnostics go through `trace`, never here."""
+    print(text, flush=True)
 
 
 def run(cmd: list[str]) -> str:
@@ -43,28 +55,35 @@ def have(tool: str) -> bool:
 
 def probe(path: Path) -> dict:
     """Duration and loudness, both from ffprobe/ffmpeg — no python audio libraries needed."""
-    out = run(["ffprobe", "-v", "error", "-show_entries", "format=duration",
-               "-of", "default=nw=1:nk=1", str(path)]).strip()
-    try:
-        duration = float(out)
-    except ValueError:
-        duration = 0.0
-    loud = 0.0
-    try:
-        vol = subprocess.run(["ffmpeg", "-hide_banner", "-i", str(path), "-af", "volumedetect",
-                              "-f", "null", "-"], capture_output=True, text=True).stderr
-        match = re.search(r"mean_volume:\s*(-?\d+(?:\.\d+)?) dB", vol)
-        if match:
-            loud = float(match.group(1))
-    except Exception:
-        pass
+    with trace.span("voicebank.probe", level="debug", channel=LANE, clip=path.name) as sp:
+        out = run(["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                   "-of", "default=nw=1:nk=1", str(path)]).strip()
+        try:
+            duration = float(out)
+        except ValueError:
+            duration = 0.0
+            trace.event("voicebank.probe.unparsed", level="debug", channel=LANE, clip=path.name,
+                        ffprobe=str(out)[:80])
+        loud = 0.0
+        try:
+            vol = subprocess.run(["ffmpeg", "-hide_banner", "-i", str(path), "-af", "volumedetect",
+                                  "-f", "null", "-"], capture_output=True, text=True).stderr
+            match = re.search(r"mean_volume:\s*(-?\d+(?:\.\d+)?) dB", vol)
+            if match:
+                loud = float(match.group(1))
+        except Exception:                                        # noqa: BLE001
+            pass
+        sp.ok(seconds=round(duration, 3), mean_db=loud)
     return {"seconds": round(duration, 3), "mean_db": loud}
 
 
 def to_wav(src: Path, dst: Path) -> None:
     dst.parent.mkdir(parents=True, exist_ok=True)
-    run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(src),
-         "-ar", "16000", "-ac", "1", "-sample_fmt", "s16", str(dst)])
+    with trace.span("voicebank.convert", level="debug", channel=LANE, clip=src.name,
+                    bytes=src.stat().st_size if src.is_file() else 0) as sp:
+        run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(src),
+             "-ar", "16000", "-ac", "1", "-sample_fmt", "s16", str(dst)])
+        sp.ok(bytes=dst.stat().st_size if dst.is_file() else 0)
 
 
 def sha256(path: Path) -> str:
@@ -94,6 +113,8 @@ def maybe_embedding(wavs: list[Path]) -> dict | None:
         import torch
         from transformers import AutoFeatureExtractor, AutoModel  # noqa: F401
     except Exception:
+        trace.event("voicebank.embedding.skipped", level="debug", channel=LANE, clips=len(wavs),
+                    why="torch/transformers not installed in this interpreter")
         return None
     return {"note": "torch present but no speaker encoder is configured; averaging skipped"}
 
@@ -108,23 +129,36 @@ def main() -> int:
     profile = PROFILES / args.profile
     voice_dir = profile / "voice"
     if not voice_dir.is_dir():
-        print(f"no voice folder: {voice_dir}")
+        trace.event("voicebank.refused", level="error", channel=LANE, reason="no voice folder", path=str(voice_dir))
+        _say(f"no voice folder: {voice_dir}")
         return 2
     clips = sorted(p for p in voice_dir.iterdir() if p.suffix.lower() in AUDIO_SUFFIXES)
+    skipped = sorted(p.name for p in voice_dir.iterdir() if p.is_file() and p.suffix.lower() not in AUDIO_SUFFIXES)
     if not clips:
-        print(f"no audio in {voice_dir}")
+        trace.event("voicebank.refused", level="error", channel=LANE, reason="no audio", path=str(voice_dir),
+                    skipped=len(skipped))
+        _say(f"no audio in {voice_dir}" + (f" ({len(skipped)} non-audio file(s) skipped)" if skipped else ""))
         return 2
     if not have("ffmpeg") or not have("ffprobe"):
-        print("ffmpeg/ffprobe are required")
+        missing = [tool for tool in ("ffmpeg", "ffprobe") if not have(tool)]
+        trace.event("voicebank.refused", level="error", channel=LANE, reason="missing tools", missing=missing)
+        _say("ffmpeg/ffprobe are required")
         return 2
+    if skipped:
+        # a file in voice/ that is not audio is exactly the thing a person cannot see by looking at the bank later
+        trace.event("voicebank.skipped", level="info", channel=LANE, count=len(skipped), files=skipped[:10],
+                    why="suffix is not one of the audio types")
 
     speaker = args.name or args.profile
     bank = profile / "voicebank"
     audio_dir = bank / "dataset" / "audio"
     audio_dir.mkdir(parents=True, exist_ok=True)
+    started = time.time()
+    trace.event("voicebank.start", channel=LANE, profile=args.profile, clips=len(clips), speaker=speaker,
+                reference_seconds=args.reference_seconds, bank=str(bank))
 
     rows, wavs = [], []
-    for clip in clips:
+    for index, clip in enumerate(clips, 1):
         target = audio_dir / (clip.stem + ".wav")
         to_wav(clip, target)
         meta = probe(target)
@@ -138,7 +172,8 @@ def main() -> int:
             "sha256": sha256(target),
             "sampling_rate": 16000,
         })
-        print(f"  {clip.name[:52]:52s} {meta['seconds']:6.2f}s {meta['mean_db']:7.1f} dB")
+        trace.event("voicebank.clip", level="debug", channel=LANE, index=index, of=len(clips), clip=clip.name,
+                    seconds=meta["seconds"], mean_db=meta["mean_db"])
 
     # HF datasets layout: one JSON object per line, no dependence on a python library to read it back
     meta_path = bank / "dataset" / "metadata.jsonl"
@@ -211,9 +246,13 @@ transcript.
         "dataset": "dataset",
     }, indent=2) + "\n", encoding="utf-8")
 
-    print(f"\nbank: {bank}")
-    print(f"  clips {len(wavs)} · {sum(durations):.1f}s total · reference {total:.1f}s from {len(chosen)} clip(s)")
-    print(f"  reference {'written' if chosen else 'NOT written'} · embedding {'yes' if speaker_json['embedding'] else 'no (no torch/speaker encoder)'}")
+    trace.event("voicebank.done", channel=LANE, clips=len(wavs), seconds=round(sum(durations), 2),
+                reference_s=round(total, 2), reference_from=len(chosen),
+                embedding="yes" if speaker_json["embedding"] else "no",
+                elapsed_s=round(time.time() - started, 2), bank=str(bank))
+    _say(f"bank: {bank}")
+    _say(f"  clips {len(wavs)} · {sum(durations):.1f}s total · reference {total:.1f}s from {len(chosen)} clip(s)")
+    _say(f"  reference {'written' if chosen else 'NOT written'} · embedding {'yes' if speaker_json['embedding'] else 'no (no torch/speaker encoder)'}")
     return 0
 
 

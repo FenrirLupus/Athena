@@ -9,6 +9,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from core import trace
+
 __all__ = ["parse", "read", "read_text"]
 
 
@@ -21,6 +23,8 @@ def _typed(raw: str):
         try:
             return json.loads(text)
         except json.JSONDecodeError:
+            # a typed field that does not parse is handed through as its literal text — say so once
+            trace.event("frontmatter.value.literal", level="debug", text=text[:200])
             return text
     if len(text) >= 2 and text[0] == text[-1] and text[0] in "\"'":
         return text[1:-1]
@@ -68,8 +72,12 @@ def read_text(path) -> str:
     """The file's text, or empty when it cannot be read — a missing manifest is not an error here."""
     try:
         return Path(path).read_text(encoding="utf-8")
-    except OSError:
-        return ""
+    except FileNotFoundError:
+        trace.event("frontmatter.text.default", level="debug", path=str(path), reason="missing")
+    except OSError as exc:
+        trace.event("frontmatter.text.default", level="debug", path=str(path),
+                    reason=type(exc).__name__, error=str(exc)[:200])
+    return ""
 
 
 def read(path, *, typed: bool = False) -> tuple[dict, str]:
