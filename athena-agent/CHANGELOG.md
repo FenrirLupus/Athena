@@ -41,6 +41,10 @@ Measured against `alpha-0.0.2`: 26 files added, 104 modified, 3 removed, +4223 /
 `#` documentation corrected where it had drifted: version, authentication, the live approval endpoint, and a
   capability table that listed shipped tools as absent
 
+`#` page band sizing corrected after 0.0.3's first push: the call page's metrics band no longer overrides
+  another page's grid rows, so the chat composer is not clipped and the home page header is not padded —
+  each page sizes its own outer rows and the footer takes its content's height
+
 ---
 
 ## 0.0.2 — alpha (in progress, not released)

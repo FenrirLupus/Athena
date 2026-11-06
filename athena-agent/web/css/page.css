@@ -869,7 +869,7 @@ body[data-page="chat"] #page-body > aside.rail .rail-dot { flex: 0 0 auto; }
 
 /* the composer: three columns, 3:1 buttons, centred in its band */
 body[data-page="chat"] #page-root {
-  grid-template-rows: minmax(0, 1fr) 34px;   /* the metrics band needs a row tall enough to read */
+  grid-template-rows: minmax(0, 1fr) auto;   /* the composer sizes this row; a fixed height clips it */
 }
 
 #page-footer {
@@ -1592,7 +1592,7 @@ body[data-page="agents"] #page-body {
 }
 
 /* the call page: an agent rail, and one stage where the call happens */
-body[data-page="call"] #page-root { grid-template-rows: minmax(0, 1fr) 5%; }
+body[data-page="call"] #page-root { grid-template-rows: minmax(0, 1fr) auto; }
 body[data-page="call"] #page-header { display: none; }
 /* id + class: the generic #page-body rules are id-specific and would otherwise win over a bare class */
 #page-body.call-body {
@@ -1713,5 +1713,10 @@ body[data-page="call"] #page-header { display: none; }
 .call-rail .call-list { gap: 4px; }
 .call-rail .call-card { padding: 5px 8px; }
 
-/* last word: the metrics band overrides any earlier row sizing for the page shell */
-html body #page-root { grid-template-rows: minmax(0, 1fr) 34px; }
+
+/* the call page puts stage timings in this band; every other page sizes it to its own content */
+body[data-page="call"] #page-footer { min-height: 34px; }
+
+/* the home page has a real page header above its body; a percentage row clips it, so both outer rows
+   take their content's height and only the middle row flexes */
+body[data-page="home"] #page-root { grid-template-rows: auto minmax(0, 1fr) auto; }
