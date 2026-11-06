@@ -34,6 +34,7 @@ import httpx
 from models import store as model_store
 from providers.base import BaseProvider, ProviderError
 from core.context_window import effective_window
+from core.root import athena_root
 
 # the tiered runtime lives beside this file and is executed by model.local.python
 RUNTIME = Path(__file__).with_name("offload_runtime.py")
@@ -60,8 +61,7 @@ class LocalServer:
         self.command = str(local.get("command") or "")
         self.timeout = float(local.get("startup_timeout_s")
                              or (600 if (local.get("backend") or "").lower() == "vllm" else 180))
-        self.log_path = Path(local.get("log") or (Path(os.environ.get("ATHENA_ROOT")
-                                                       or (Path.home() / ".athena")) / "logs" / "model-server.log"))
+        self.log_path = Path(local.get("log") or (athena_root() / "logs" / "model-server.log"))
         self.proc: subprocess.Popen | None = None
         self.base_url = ""
 

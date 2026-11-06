@@ -94,7 +94,6 @@ def build(instructions: str, channel_root: Path, history: list[dict], user_text:
     # labelled parts, so the report can say WHICH block costs what — a total of ~890 tokens tells you to
     # optimise something; a breakdown tells you what, and every later cut is then measurable
     blocks: list[tuple[str, str]] = []
-    parts = [text for _, text in blocks]        # kept as a view for the join below
     if instructions.strip():
         blocks.append(("instructions", _fit(instructions.strip(), alloc["system"], "instructions", factor)))
 

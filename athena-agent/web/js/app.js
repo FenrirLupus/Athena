@@ -37,54 +37,6 @@ const App = (() => {
     });
   }
 
-  function wireTabs() {
-    const tabs = document.querySelectorAll('.tab[data-tab]');
-    if (!tabs.length) return;
-    // association on load, not only after a click: the strip was announced as a tab list with no selected tab
-    tabs.forEach(button => {
-      const name = button.dataset.tab;
-      const panel = document.getElementById(`panel-${name}`);
-      if (panel) {
-        panel.setAttribute('role', 'tabpanel');
-        panel.setAttribute('aria-labelledby', `tab-${name}`);
-        if (!panel.id) panel.id = `panel-${name}`;
-      }
-      button.id = `tab-${name}`;
-      button.setAttribute('aria-controls', `panel-${name}`);
-      button.setAttribute('aria-selected', panel && panel.classList.contains('active') ? 'true' : 'false');
-      button.setAttribute('tabindex', button.classList.contains('active') ? '0' : '-1');
-    });
-    // arrow keys move between tabs, which is what a tablist promises
-    document.querySelectorAll('.page-nav[role="tablist"]').forEach(list => {
-      list.addEventListener('keydown', event => {
-        const keys = { ArrowRight: 1, ArrowLeft: -1, Home: 'first', End: 'last' };
-        if (!(event.key in keys)) return;
-        const items = [...list.querySelectorAll('[role="tab"]')];
-        const at = items.indexOf(document.activeElement);
-        if (at < 0) return;
-        event.preventDefault();
-        const next = keys[event.key] === 'first' ? items[0]
-                   : keys[event.key] === 'last' ? items[items.length - 1]
-                   : items[(at + keys[event.key] + items.length) % items.length];
-        next.focus();
-        next.click();
-      });
-    });
-    tabs.forEach(button => {
-      button.addEventListener('click', () => {
-        const name = button.dataset.tab;
-        tabs.forEach(other => {
-          other.classList.toggle('active', other === button);
-          other.setAttribute('aria-selected', other === button ? 'true' : 'false');
-          other.setAttribute('tabindex', other === button ? '0' : '-1');
-        });
-        document.querySelectorAll('.panel').forEach(panel => {
-          panel.classList.toggle('active', panel.id === `panel-${name}`);
-        });
-        Live.state.tab = name;
-      });
-    });
-  }
 
   function wireComposer() {
     const input = document.getElementById('chat-text');
@@ -107,7 +59,6 @@ const App = (() => {
   function boot() {
     watchErrors();
     markNav();
-    wireTabs();
     wireComposer();
     Live.start();
   }

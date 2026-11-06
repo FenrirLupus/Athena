@@ -54,8 +54,8 @@ import traceback
 from pathlib import Path
 
 from tools.registry import Tool
+from core import frontmatter
 
-DEFAULT_ENTRY = "scripts/plugin.py"
 LEGACY_ENTRIES = ("scripts/plugin.py", "plugin.py")
 
 
@@ -243,19 +243,8 @@ def roots(profile_root: Path | None = None, athena_root: Path | None = None) -> 
 
 
 def _frontmatter(path: Path) -> tuple[dict, str]:
-    text = path.read_text(encoding="utf-8")
-    meta: dict = {}
-    body = text
-    if text.startswith("---"):
-        end = text.find("\n---", 3)
-        if end != -1:
-            body = text[end + 4:].lstrip("\n")
-            for line in text[3:end].splitlines():
-                if not line.strip() or line.lstrip().startswith("#") or ":" not in line:
-                    continue
-                key, _, value = line.partition(":")
-                meta[key.strip().lower()] = value.strip().strip('"').strip("'")
-    return meta, body
+    """Split `---` frontmatter from the body of a manifest."""
+    return frontmatter.read(path)
 
 
 def discover(profile_root: Path | None = None, athena_root: Path | None = None) -> list[dict]:
@@ -432,10 +421,6 @@ def _record(athena_root, kind: str, detail: str, path: str = "", lane: str = "",
         pass
 
 
-def lane_plugins(lane_cfg) -> dict | None:
-    """The lane's `plugins:` block, or None when it has none (which means: inherit the ceiling)."""
-    block = (lane_cfg or {}).get("plugins")
-    return block if isinstance(block, dict) else None
 
 
 def lane_enabled(global_cfg: dict, lane_cfg) -> tuple[list[str], list[str], str]:

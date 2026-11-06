@@ -5,14 +5,15 @@ Extracted from `ChannelManager` (optimization plan B2c). The manager keeps the c
 
 Two invariants drive it:
 
-- **The queue is a dumb FIFO; the agent is the state machine.** A task is queued the moment it arrives and
-  starts only when the channel is idle. Nothing reorders.
+- **Each subchannel is a dumb FIFO; the agent is the state machine.** A task is queued the moment it arrives
+  and starts only when the channel is idle. Typed turns keep their order and spoken turns keep theirs; the worker
+  serves voice ahead of messages so a question asked out loud is not held behind a backlog of typing.
 - **The caller waits on its own job, never on the channel.** A lane-wide event once woke whoever happened to be
   waiting, so two concurrent submits returned each other's turn; each job carries its own `done`.
 """
 from __future__ import annotations
 
-import sys
+import queue
 import threading
 import time
 from typing import Protocol
@@ -81,7 +82,7 @@ class Admission:
 
     # -- putting work in ---------------------------------------------------
     def enqueue(self, name: str, text: str, *, author: str = "", hops: int = 0,
-                reply_to: str | None = None) -> dict:
+                reply_to: str | None = None, mode: str = "chat") -> dict:
         """Queue a turn without waiting for it. Used by mentions and by the /ask endpoint."""
         registry = self.registry
         if not text.strip():
@@ -95,9 +96,10 @@ class Admission:
 
         # Admission: a task is *queued* whenever it arrives; the channel only *starts* one when it is idle.
         # The queue depth is capped so a flood is refused rather than growing without bound.
-        self._check_capacity(name, channel)
-        channel.queue.put({"text": text, "author": author, "hops": hops, "reply_to": reply_to,
-                           "queued_at": time.time()})
+        self._check_capacity(name, channel, mode)
+        self._queue_for(channel, mode).put({"text": text, "author": author, "hops": hops, "reply_to": reply_to,
+                           "queued_at": time.time(), "mode": mode})
+        channel.work_ready.set()                       # the worker sleeps on this event, so every put must set it
         self.notice_if_busy(channel, text, author)
         if reply_to and reply_to != name:
             # the asker now has an outstanding question: this is what the interface shows on the right
@@ -107,9 +109,9 @@ class Admission:
                 asker.awaiting[name] = asker.awaiting.get(name, 0) + 1
         self._mark_queued(channel)
         return {"queued": True, "channel": name, "author": author, "hops": hops,
-                "queue_depth": channel.queue.qsize()}
+                "queue_depth": self._queue_for(channel, mode).qsize()}
 
-    def submit(self, name: str, text: str, wait_s: float = 120.0) -> dict:
+    def submit(self, name: str, text: str, wait_s: float = 120.0, mode: str = "chat") -> dict:
         """Queue a turn and wait for *this* job to finish (or for the wait to expire)."""
         registry = self.registry
         channel = registry.channel(name)
@@ -117,38 +119,70 @@ class Admission:
         channel.last_seen = time.time()
         with channel._lock:
             before = channel.turns
-        self._check_capacity(name, channel)
+        self._check_capacity(name, channel, mode)
         done = threading.Event()
-        channel.queue.put({"text": text, "done": done, "queued_at": time.time()})
+        job = {"text": text, "done": done, "queued_at": time.time(), "mode": mode}
+        self._queue_for(channel, mode).put(job)
+        channel.work_ready.set()
         self.notice_if_busy(channel, text)
         self._mark_queued(channel)
         finished = done.wait(timeout=wait_s)
+        if job.get("cancelled"):
+            # the queue answered before the worker could take the job, so the wait ends here rather than after
+            # the timeout with a "still queued" report for work that will never run
+            return {"channel": name, "status": "cancelled", "reply": "",
+                    "note": job.get("note") or "the channel was closed before this turn ran"}
         with channel._lock:
             result = dict(channel.last_result or {})
             advanced = channel.turns > before
         if not finished or not advanced:
             return {"channel": name, "status": "queued",
-                    "reply": "", "queue_depth": channel.queue.qsize(),
+                    "reply": "", "queue_depth": self._queue_for(channel, mode).qsize(),
                     "note": f"turn still running after {wait_s:.0f}s; it will finish in order"}
         return result
 
     # -- the worker --------------------------------------------------------
+    @staticmethod
+    def _queue_for(channel, mode: str):
+        """A voice turn has its own FIFO, so a call is never stuck behind a queue of typed turns."""
+        return channel.call_queue if (mode or "chat") == "call" else channel.queue
+
+    def _next_job(self, channel):
+        """Voice first, then message: each subchannel keeps its own order, calls are served before waiting chats."""
+        for source in (channel.call_queue, channel.queue):
+            try:
+                return source.get_nowait(), source
+            except queue.Empty:
+                continue
+        return None, None
+
     def worker(self, channel) -> None:
-        """Drain this channel's queue forever — one turn at a time, in order."""
+        """Drain this channel's two queues forever — one turn at a time, each queue in its own order."""
         while True:
-            job = channel.queue.get()
+            if channel.stopping:                      # the profile was deleted: nothing more to serve
+                return
+            job, source = self._next_job(channel)
+            if job is None:
+                channel.work_ready.wait()
+                channel.work_ready.clear()
+                job, source = self._next_job(channel)
+                if job is None:
+                    continue
             if job is _STOP:                          # the profile was deleted; this worker has nothing to serve
-                channel.queue.task_done()
+                source.task_done()
                 return
             try:
                 self.registry.do_turn(channel, job)
             finally:
-                channel.queue.task_done()
+                source.task_done()
 
     # -- helpers -----------------------------------------------------------
-    def _check_capacity(self, name: str, channel) -> None:
-        if channel.queue.qsize() >= self.registry.max_queue:
-            raise ValueError(f"{name} queue is full ({self.registry.max_queue} waiting) — "
+    def _check_capacity(self, name: str, channel, mode: str = "chat") -> None:
+        """Cap the queue this turn will actually join: each subchannel has its own backlog."""
+        target = self._queue_for(channel, mode)
+        if target.qsize() >= self.registry.max_queue:
+            label = "voice" if (mode or "chat") == "call" else "message"
+            raise ValueError(f"{name} {label} queue is full ({self.registry.max_queue} waiting) — "
                              f"try again when it is idle")
 
     def _mark_queued(self, channel) -> None:
@@ -157,7 +191,28 @@ class Admission:
 
     def stop(self, channel) -> None:
         """Wake a worker so it can exit — called when a channel is dropped because its profile is gone."""
+        # the flag is what the worker checks; the sentinel is also left in both queues so a worker parked in
+        # either one wakes up, and one queued behind voice turns is not left to drain them first
+        channel.stopping = True
+        # a queued caller is waiting on its own done event, so a job that will never run must be answered rather
+        # than left to time out and be reported as still queued
+        for source in (channel.call_queue, channel.queue):
+            while True:
+                try:
+                    job = source.get_nowait()
+                except queue.Empty:
+                    break
+                if isinstance(job, dict) and job.get("done") is not None:
+                    try:
+                        job["cancelled"] = True
+                        job["note"] = "the channel was closed before this turn ran"
+                        job["done"].set()
+                    except Exception:                # noqa: BLE001 — a waiter that has gone is not an error
+                        pass
+                source.task_done()
         try:
+            channel.call_queue.put(_STOP)
             channel.queue.put(_STOP)
+            channel.work_ready.set()
         except Exception:                            # noqa: BLE001 — a closed queue means it is already gone
             pass

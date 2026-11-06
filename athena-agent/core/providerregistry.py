@@ -36,11 +36,13 @@ So the registry is safe to read, print and commit: it names keys, it never carri
 from __future__ import annotations
 
 import json
-import os
-import time
 from pathlib import Path
+from core import timefmt
+from core.jsonio import read_json
+from core.root import athena_root
+from core import durable
 
-ATHENA_ROOT = Path(os.environ.get("ATHENA_ROOT") or (Path.home() / ".athena"))
+ATHENA_ROOT = athena_root()
 REGISTRY = ATHENA_ROOT / "provider.json"
 
 
@@ -50,18 +52,13 @@ def path() -> Path:
 
 def load() -> dict:
     """The registry, or an empty one. A corrupt file must not stop a turn."""
-    try:
-        data = json.loads(REGISTRY.read_text(encoding="utf-8"))
-        return data if isinstance(data, dict) else {}
-    except (OSError, json.JSONDecodeError):
-        return {}
+    data = read_json(REGISTRY, {})
+    return data if isinstance(data, dict) else {}
 
 
 def save(data: dict) -> None:
     REGISTRY.parent.mkdir(parents=True, exist_ok=True)
-    tmp = REGISTRY.with_suffix(".tmp")
-    tmp.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
-    os.replace(tmp, REGISTRY)                       # atomic: a half-written registry loses keys' names
+    durable.write_state(REGISTRY, json.dumps(data, indent=2, sort_keys=True))
 
 
 def register(provider: str, *, format: str = "openai", base_url: str = "",
@@ -88,7 +85,7 @@ def register(provider: str, *, format: str = "openai", base_url: str = "",
         entry["contexts"] = {str(k): int(v) for k, v in contexts.items() if v}
     if models is not None:
         entry["models"] = list(models)
-        entry["models_updated"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        entry["models_updated"] = timefmt.stamp()
     save(data)
     return entry
 
@@ -144,11 +141,6 @@ def set_contexts(provider: str, contexts: dict[str, int]) -> dict:
     return register(provider, contexts=clean)
 
 
-def context_of(provider: str, model: str) -> int | None:
-    """The published window for one model, or None when the provider never published one."""
-    block = (load().get((provider or "").lower()) or {}).get("contexts") or {}
-    value = block.get(str(model))
-    return int(value) if value else None
 
 
 def fetch_model_rows(base_url: str, key: str = "", timeout: float = 20.0) -> list[dict]:

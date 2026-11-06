@@ -72,7 +72,7 @@
 
 body[data-layout="app"] #page-body {
   display: grid;
-  grid-template-columns: 236px 1fr;
+  grid-template-columns: var(--rail) 1fr;
   min-height: 0;
   overflow: hidden;
   padding: 0;
@@ -235,8 +235,6 @@ body:not([data-layout="app"]) #page-footer {
 .rail-status[data-state="waking"]  { color: var(--state-waking); }
 .rail-status[data-state="idle"]    { color: var(--state-idle-faint); }
 
-.rail-new { display: flex; gap: 6px; }
-
 .channel-new-input {
   flex: 1 1 auto;
   min-width: 0;
@@ -252,8 +250,6 @@ body:not([data-layout="app"]) #page-footer {
 .channel-new-input:focus { outline: none; border-color: var(--accent); }
 
 .btn-quiet { padding: 4px 10px; }
-
-.rail-foot { margin: 0; padding: 0 6px; }
 
 /* panels */
 .panels { position: relative; min-height: 0; overflow: hidden; }
@@ -605,10 +601,6 @@ body:not([data-layout="app"]) #page-footer {
 .prose p { margin: 0 0 8px; max-width: 72ch; }
 .prose code { font-family: var(--mono); font-size: 12.5px; color: var(--accent); }
 
-.link-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
-.link-list a { color: var(--accent); text-decoration: none; font-family: var(--mono); font-size: 13px; }
-.link-list a:hover { text-decoration: underline; }
-
 @media (max-width: 860px) {
   #page-body { grid-template-columns: 1fr; }
   /* .rail stays visible at every width */
@@ -733,11 +725,6 @@ body:not([data-layout="app"]) #page-footer {
 .apv-title strong { color: var(--text); font-weight: 600; }
 .apv-title em { color: var(--accent); font-style: normal; }
 
-.apv-reason {
-  font-size: 13px; color: var(--muted); line-height: 1.45;
-  margin: 0 0 12px; overflow-wrap: anywhere;
-}
-
 .apv-actions { display: flex; gap: 6px; justify-content: flex-end; }
 .apv-btn {
   font: inherit; font-size: 12.5px; cursor: pointer;
@@ -771,9 +758,6 @@ body:not([data-layout="app"]) #page-footer {
   font-size: 9.5px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted);
   border: 1px solid var(--chip-line); border-radius: 4px; padding: 1px 5px;
 }
-.apv-kind-install, .apv-kind-tool { color: var(--accent); border-color: var(--accent-edge-soft); }
-.apv-kind-box { color: var(--warn); border-color: var(--warn-edge); }
-.apv-kind-path { color: var(--ok); border-color: var(--ok-edge-soft); }
 .apv-agent { font-size: 10.5px; color: var(--muted); }
 .apv-clock { margin-left: auto; font-size: 10.5px; color: var(--warn); font-variant-numeric: tabular-nums; }
 .apv-warning {
@@ -833,7 +817,7 @@ body:not([data-layout="app"]) #page-footer {
 .term-hint { font-family: var(--mono); font-size: 11px; color: var(--dim); min-height: 14px; }
 
 /* page specs: the wide column, the settings side panel, the first-run guide */
-.page-col { max-width: 1180px; margin: 0 auto; padding: 0 20px; }
+.page-col { max-width: var(--measure); margin: 0 auto; padding: 0 20px; }
 .home-grid {
   display: grid; gap: 14px;
   grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
@@ -845,31 +829,10 @@ body:not([data-layout="app"]) #page-footer {
 .quickstart-step { margin: 4px 0; font-size: 12.5px; }
 .quickstart-step strong { color: var(--text); }
 
-.shell {
-  display: grid; grid-template-columns: 236px minmax(0, 1fr);
-  gap: 18px; align-items: start;
-}
-.sidenav {
-  display: flex; flex-direction: column; gap: 2px;
-  border-right: 1px solid var(--line); padding-right: 10px;
-}
-.sidenav-item {
-  text-align: left; font: inherit; font-size: 12.5px;
-  background: none; border: 0; border-radius: 4px;
-  color: var(--muted); padding: 6px 9px; cursor: pointer;
-}
-.sidenav-item:hover { background: var(--panel-2); color: var(--text); }
-.sidenav-item.active { background: var(--panel-2); color: var(--accent); }
-.section-panels { min-width: 0; }
-.section-panel[hidden] { display: none; }
-
 .steps { display: flex; gap: 6px; }
 .steps .tab[aria-current="step"] { border-color: var(--accent); color: var(--accent); }
 
-@media (max-width: 860px) {
-  .shell { grid-template-columns: 1fr; }
-  .sidenav { flex-direction: row; flex-wrap: wrap; border-right: 0; border-bottom: 1px solid var(--line); padding: 0 0 8px; }
-}
+
 
 /* ---- layout: eight layers, every band a percentage of its own reference ---- */
 html, body { height: 100%; }
@@ -905,7 +868,11 @@ body[data-page="chat"] #page-body > aside.rail .rail-item {
 body[data-page="chat"] #page-body > aside.rail .rail-dot { flex: 0 0 auto; }
 
 /* the composer: three columns, 3:1 buttons, centred in its band */
-body[data-page="chat"] #page-footer {
+body[data-page="chat"] #page-root {
+  grid-template-rows: minmax(0, 1fr) 34px;   /* the metrics band needs a row tall enough to read */
+}
+
+#page-footer {
   display: flex; align-items: center; justify-content: center; min-height: 0; padding: 0 2%;
 }
 body[data-page="chat"] #page-footer > form.composer { flex: 1 1 100%; width: 100%; margin: 0; }
@@ -1001,12 +968,6 @@ nav.global-nav .nav-link { white-space: nowrap; }
 
 /* ---- scrolling: the site fits the window, only the inner panels scroll ---- */
 html, body { overflow: hidden; }
-
-/* one scrollbar, in the site's own colours */
-.thread-scroll, .rail-list, .term-log, .sidenav, .section-panels {
-  scrollbar-width: thin;
-  scrollbar-color: var(--line) transparent;
-}
 .thread-scroll::-webkit-scrollbar,
 .rail-list::-webkit-scrollbar,
 .term-log::-webkit-scrollbar { width: 10px; height: 10px; }
@@ -1142,11 +1103,7 @@ nav.global-nav .nav-icon { position: relative; }
 #acct-body .lic-foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: nowrap; }
 #acct-body .lic-foot .lic-status { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #acct-body .lic-foot .btn-send { flex: 0 0 auto; margin-left: auto; }
-.acct-section { background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; }
 .acct-h { margin: 0 0 8px; font-size: 11px; color: var(--muted); letter-spacing: .06em; text-transform: uppercase; }
-.acct-kv, .acct-lane { display: grid; grid-template-columns: 130px minmax(0, 1fr); gap: 8px; padding: 3px 0; font-size: 12px; }
-.acct-lane { grid-template-columns: 14px minmax(0, 1fr) auto; align-items: center; }
-.acct-k { color: var(--dim); }
 .acct-v { color: var(--text); overflow: hidden; text-overflow: ellipsis; }
 
 /* console lines carry their level as a word as well as a colour */
@@ -1198,7 +1155,7 @@ nav.global-nav .nav-icon { position: relative; }
 body[data-page="settings"] #page-body {
   display: grid; grid-template-columns: 20% minmax(0, 1fr);
   gap: 0; padding: 0;
-  /* .page-col/.home-grid arrive from the home spec and cap the band at 1180px centred; the panel must reach
+  /* .page-col/.home-grid arrive from the home spec and cap the band at var(--measure) centred; the panel must reach
      the window edge, so the settings band states its own width and alignment */
   width: 100%; max-width: 100%; margin: 0; align-items: stretch;
   /* the band is the window's leftover height, exactly as chat's is; without this the content sets the height
@@ -1367,7 +1324,6 @@ body[data-page="agents"] #page-body {
   font-size: 34px; letter-spacing: .04em; color: #10141a;
   border: 1px solid var(--line); overflow: hidden;
 }
-.lic-caption { font-size: 10px; color: var(--dim); font-family: var(--mono); }
 .lic-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 12px; align-content: start; }
 .lic-fields-2 { padding: 0 16px 12px; }
 .lic-field { display: flex; flex-direction: column; gap: 2px; }
@@ -1457,10 +1413,6 @@ body[data-page="agents"] #page-body {
 .lic-date { display: flex; gap: 6px; }
 .lic-date select { flex: 1 1 auto; min-width: 0; }
 .lic-accent { display: flex; align-items: center; gap: 8px; }
-.lic-colour {
-  flex: 0 0 auto; width: 48px; height: 30px; padding: 0; cursor: pointer;
-  background: transparent; border: 1px solid var(--line); border-radius: 4px;
-}
 .lic-alpha { flex: 0 0 120px; accent-color: var(--accent); }
 .lic-accent .lic-input { flex: 1 1 auto; font-family: var(--mono); font-size: 11.5px; }
 .lic-field.wide .lic-input[style] { border-bottom: 0; border-radius: 4px; padding: 4px 8px; }
@@ -1639,12 +1591,127 @@ body[data-page="agents"] #page-body {
   white-space: nowrap;
 }
 
-/* the editable "You" block in the account window */
-.acct-field { display: grid; grid-template-columns: 90px minmax(0, 1fr); gap: 8px; align-items: center; margin-bottom: 5px; }
-.acct-input {
-  font: inherit; font-size: 12px; padding: 4px 7px; width: 100%;
-  background: var(--panel); color: var(--text);
-  border: 1px solid var(--line); border-radius: 4px;
+/* the call page: an agent rail, and one stage where the call happens */
+body[data-page="call"] #page-root { grid-template-rows: minmax(0, 1fr) 5%; }
+body[data-page="call"] #page-header { display: none; }
+/* id + class: the generic #page-body rules are id-specific and would otherwise win over a bare class */
+#page-body.call-body {
+  display: grid; grid-template-columns: 20% minmax(0, 1fr);
+  width: 100%; max-width: 100%; height: 100%; min-height: 0; padding: 0; margin: 0; overflow: hidden;
+  align-items: stretch;
 }
-.acct-input:focus { outline: none; border-color: var(--accent-line); }
-.acct-save-row { display: flex; align-items: center; gap: 10px; padding-top: 6px; }
+.call-rail { border-right: 1px solid var(--line); overflow-y: auto; padding: 10% 8% 10px; display: flex; flex-direction: column; gap: 8px;
+  scrollbar-width: thin; scrollbar-color: var(--line) transparent; }
+.call-rail-head { font-size: 10px; letter-spacing: .08em; text-transform: uppercase; color: var(--dim); padding-bottom: 8px; }
+.call-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.call-card {
+  width: 100%; display: flex; align-items: center; gap: 8px; text-align: left; font: inherit; cursor: pointer;
+  padding: 7px 9px; border-radius: 6px; background: var(--panel); border: 1px solid var(--line); color: var(--text);
+}
+.call-card:hover { border-color: var(--muted); background: var(--panel-2); }
+.call-card.active { border-color: var(--accent-line); background: var(--panel-2); box-shadow: inset 2px 0 0 var(--accent); }
+.call-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex: 0 0 auto; }
+.call-dot[data-state="idle"] { background: var(--ok); }
+.call-dot[data-state="working"] { background: var(--accent); }
+.call-dot[data-state="sleeping"] { background: var(--state-sleeping); }
+.call-copy { display: flex; flex-direction: column; min-width: 0; }
+.call-card-name { font-size: 12px; }
+.call-card-meta { font-size: 10px; color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+.call-stage {
+  display: flex; flex-direction: column; min-height: 0; padding: 1.5% 2%; gap: 7px;
+  overflow-y: auto; scrollbar-width: thin; scrollbar-color: var(--line) transparent;
+}
+.call-window {
+  flex: 0 0 auto; display: grid; grid-template-columns: 72px minmax(0, 1fr); grid-template-rows: auto auto;
+  gap: 4px 12px; align-items: center;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px;
+}
+.call-portrait {
+  grid-row: span 2; width: 72px; height: 72px; border-radius: 14px; display: grid; place-items: center;
+  background: var(--panel-2); color: #10141a; font-size: 20px; letter-spacing: .04em;
+  border: 1px solid var(--line); background-size: cover; background-position: center;
+}
+.call-name { margin: 0; font-size: 15px; }
+.call-sub { font-size: 11px; color: var(--dim); }
+.call-wave { width: 100%; height: 30px; display: block; grid-column: 2; border-radius: 4px; background: var(--bg); }
+.call-say { grid-column: 1 / -1; margin: 4px 0 0; font-size: 12px; color: var(--muted); }
+.call-transcript {
+  flex: 1 1 auto; min-height: 48px; overflow-y: auto; border: 1px solid var(--line); border-radius: 10px;
+  background: var(--panel); padding: 10px 12px; display: flex; flex-direction: column; gap: 6px;
+  scrollbar-width: thin; scrollbar-color: var(--line) transparent;
+}
+.call-line { display: grid; grid-template-columns: 58px minmax(0, 1fr); gap: 8px; font-size: 12px; }
+.call-line-kind { font-size: 9.5px; letter-spacing: .06em; text-transform: uppercase; color: var(--dim); padding-top: 2px; }
+.call-line-system .call-line-text { color: var(--dim); font-style: italic; }
+.call-controls { display: flex; justify-content: center; gap: 10px; flex: 0 0 auto; }
+.call-btn {
+  min-width: 112px; height: 32px; font: inherit; font-size: 12px; cursor: pointer;
+  border-radius: 8px; background: var(--panel-2); color: var(--text); border: 1px solid var(--line);
+}
+.call-btn:hover:not(:disabled) { border-color: var(--muted); }
+.call-btn:disabled { opacity: .45; cursor: default; }
+.call-start { background: var(--accent); border-color: var(--accent); color: var(--bg); font-weight: 600; }
+.call-end { color: var(--bad); border-color: var(--bad); }
+.call-note { margin: 0; font-size: 10.5px; color: var(--dim); text-align: center; }
+
+/* voice gate settings on the call page */
+.call-settings { border: 1px solid var(--line); border-radius: 8px; background: var(--panel); flex: 0 0 auto; }
+.call-settings-head {
+  width: 100%; display: flex; align-items: center; gap: 6px; padding: 7px 10px; cursor: pointer;
+  font: inherit; font-size: 10.5px; letter-spacing: .07em; text-transform: uppercase; color: var(--muted);
+  background: transparent; border: 0; text-align: left;
+}
+.call-settings-head .set-chevron { position: static; }
+.call-settings-head.collapsed .set-chevron { transform: rotate(-90deg); }
+.call-settings-body { padding: 2px 10px 8px; display: flex; flex-direction: column; gap: 4px; }
+.gate-row { display: grid; grid-template-columns: 44px minmax(0, 1fr) 34px; align-items: center; gap: 8px; }
+.gate-name { font-size: 10px; letter-spacing: .07em; text-transform: uppercase; color: var(--dim); }
+.gate-range { width: 100%; accent-color: var(--accent); }
+.gate-value { font-size: 10px; font-family: var(--mono); color: var(--text); text-align: right; white-space: nowrap; }
+.gate-help { margin: 0; font-size: 9.5px; color: var(--dim); line-height: 1.35; }
+.gate-state { font-size: 10px; font-family: var(--mono); color: var(--dim); }
+.gate-state[data-open="true"] { color: var(--ok); }
+
+/* the gate lives in the rail, where there is room; the stage is too short at this window height */
+.call-rail .call-settings { margin-top: 10px; }
+.call-rail .gate-row { grid-template-columns: 32px minmax(0, 1fr) 58px; gap: 5px; }
+.call-rail .gate-help { font-size: 9px; }
+
+/* the hidden attribute loses to a display rule; state it explicitly */
+.call-settings-body[hidden] { display: none; }
+
+/* grouped headings inside voice settings */
+.set-sub {
+  display: block; margin: 6px 0 2px; font-size: 9px; letter-spacing: .1em; text-transform: uppercase;
+  color: var(--muted); font-family: var(--mono);
+}
+.gate-select {
+  font: inherit; font-size: 11px; padding: 3px 6px; grid-column: 2 / -1;
+  background: var(--panel-2); color: var(--text); border: 1px solid var(--line); border-radius: 4px;
+}
+
+/* the rail is short: the two subsections carry the meaning, so the prose hint goes and the panel fits whole */
+.call-rail .gate-help { display: none; }
+.call-rail .call-settings-body { gap: 3px; }
+.call-rail .set-sub { margin: 4px 0 1px; }
+.call-rail .gate-row { min-height: 20px; }
+
+/* one line for the panel title, and the dropdown on its own row: the rail is only so tall */
+.call-settings-head { font-size: 9px; letter-spacing: .05em; }
+.call-settings-head span:last-child { white-space: nowrap; }
+.call-rail .gate-row-wide { grid-template-columns: minmax(0, 1fr); }
+.call-rail .gate-select { grid-column: 1 / -1; }
+
+/* fit all three voice subsections in a short rail */
+.call-rail { padding: 3% 8% 6px; gap: 6px; }
+.call-rail .call-settings-body { gap: 1px; padding: 2px 9px 6px; }
+.call-rail .set-sub { margin: 3px 0 1px; font-size: 8.5px; }
+.call-rail .gate-row { min-height: 18px; }
+.call-rail .gate-select { padding: 2px 5px; font-size: 10.5px; }
+.call-rail .call-settings-head { padding: 5px 9px; }
+.call-rail .call-list { gap: 4px; }
+.call-rail .call-card { padding: 5px 8px; }
+
+/* last word: the metrics band overrides any earlier row sizing for the page shell */
+html body #page-root { grid-template-rows: minmax(0, 1fr) 34px; }

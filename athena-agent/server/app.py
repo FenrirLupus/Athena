@@ -5,6 +5,8 @@ from the network (documentation/architecture/10-runtime-model.md).
 """
 from __future__ import annotations
 
+import shutil
+import tempfile
 from pathlib import Path
 
 import os
@@ -42,6 +44,8 @@ from providers import base as provider_base
 from server import channels as channels_mod
 from server.channels import ChannelManager
 from tools import registry as tools_registry
+from core.jsonio import read_json
+from core import durable
 
 
 class PersonaModel(BaseModel):
@@ -126,15 +130,28 @@ class NewAgent(BaseModel):
     name: str = Field(..., min_length=1, max_length=32)
 
 
-class AskRequest(BaseModel):
-    """One agent addressing another: the question text."""
-
-    text: str = Field(..., min_length=1, max_length=8000)
 
 
 class TurnRequest(BaseModel):
     # One user turn; capped so an unbounded body cannot exhaust memory.
     text: str = Field(..., min_length=1, max_length=32000)
+    # "call" marks a spoken turn, which budgets its prompt for latency; anything else keeps full history.
+    mode: str = "chat"
+
+
+_MODE_MARKER = __import__("re").compile(r"^\s*\[(Voice|Message)\]\s*")
+
+
+def _display_content(content: str) -> tuple[str, str]:
+    """Split a stored message into what the interface shows and the mode it arrived in.
+
+    The marker lives in the stored text so the agent can tell a spoken turn from a typed one; it is removed here,
+    at the boundary, so no renderer has to know it exists and none can disagree about how to hide it.
+    """
+    match = _MODE_MARKER.match(str(content or ""))
+    if not match:
+        return str(content or ""), ""
+    return str(content)[match.end():], match.group(1).lower()
 
 
 def create_app() -> FastAPI:
@@ -242,22 +259,6 @@ def create_app() -> FastAPI:
 
     from core import context_window as window_mod
 
-    @app.get("/diagnostics")
-    async def diagnostics(limit: int = 200):
-        """Turn outcomes folded into the three levels: what finished slowly, what is stuck, what failed."""
-        from core import metrics as metrics_mod
-        from core import outcomes as outcomes_mod
-        # the install root is two levels above this file: <root>/athena-agent/server/app.py
-        from pathlib import Path as _Path
-        base = _Path(__file__).resolve().parents[2]
-        rows = metrics_mod.read(base, limit=limit) or []
-        try:
-            slow = float((cfg.get("metrics") or {}).get("slow_turn_s") or 60.0)
-        except Exception:
-            slow = 60.0
-        return outcomes_mod.diagnostics(rows, slow_s=slow)
-
-
     @app.get("/console/history")
     async def console_history(page: int = 1, size: int = 128):
         """Whole console history, dated, 128 lines to a page."""
@@ -289,24 +290,6 @@ def create_app() -> FastAPI:
         folder = agents_dir.parent / "user" / "avatars"
         folder.mkdir(parents=True, exist_ok=True)
         return folder
-
-    @app.get("/user/avatars")
-    def list_user_avatars() -> dict:
-        folder = _user_avatars()
-        numbers = []
-        for existing in folder.glob("avatar-0*.png"):
-            try:
-                numbers.append(int(existing.stem.split("-", 1)[1]))
-            except (ValueError, IndexError):
-                continue
-        numbers.sort()
-        selected = numbers[-1] if numbers else None
-        marker = folder / "selected"
-        try:
-            selected = int(marker.read_text(encoding="utf-8").strip())
-        except (OSError, ValueError):
-            pass
-        return {"numbers": numbers, "selected": selected}
 
     @app.get("/user/avatar")
     def get_user_avatar(n: int | None = None):
@@ -364,15 +347,11 @@ def create_app() -> FastAPI:
     @app.get("/user/profile")
     def get_user_profile(channel: str = "") -> dict:
         """What the operator has told this agent about themselves. Absent fields stay absent."""
-        import json as _json
         target = _user_file(channel)
         if not target.exists():
             return {"user": {}, "channel": channel, "inherited": False}
-        try:
-            data = _json.loads(target.read_text(encoding="utf-8")) or {}
-            return {"user": data, "channel": channel, "inherited": False}
-        except (OSError, ValueError):
-            return {"user": {}, "channel": channel, "inherited": False}
+        data = read_json(target, {}) or {}
+        return {"user": data if isinstance(data, dict) else {}, "channel": channel, "inherited": False}
 
     @app.post("/user/profile")
     def put_user_profile(payload: dict, channel: str = "") -> dict:
@@ -386,10 +365,205 @@ def create_app() -> FastAPI:
                 continue
             clean[key] = str(value)[:400]
         target = _user_file(channel)
-        tmp = target.with_suffix(".json.tmp")
-        tmp.write_text(_json.dumps(clean, indent=2) + "\n", encoding="utf-8")
-        tmp.replace(target)
+        durable.write_state(target, _json.dumps(clean, indent=2) + "\n")
         return {"saved": True, "keys": sorted(clean)}
+
+    @app.post("/agents/{channel}/transcribe")
+    async def transcribe(channel: str, request: Request) -> dict:
+        """Transcribe one utterance with the local whisper, in the voice runtime.
+
+        The app venv has no torch on purpose — the speech stack lives in its own environment — so this shells out to
+        it rather than importing it. Audio arrives as whatever the browser recorded; ffmpeg normalises it to 16 kHz
+        mono first, because whisper is fussy about sample rate and the browser is not.
+        """
+        body = await request.body()
+        if not body:
+            raise HTTPException(status_code=400, detail="empty body")
+        if len(body) > 25 * 1024 * 1024:
+            raise HTTPException(status_code=413, detail="audio is too large")
+
+        root_dir = agents_dir.parent
+        runtime = root_dir / "tools" / "voice-runtime" / ".venv" / "bin" / "python"
+        script = Path(__file__).resolve().parents[1] / "scripts" / "voice.py"
+        if not runtime.exists():
+            raise HTTPException(status_code=503, detail="voice runtime is not installed")
+        if not script.exists():
+            raise HTTPException(status_code=503, detail="scripts/voice.py is missing")
+
+        import subprocess
+        import tempfile
+
+        with tempfile.TemporaryDirectory(prefix="athena-stt-") as work:
+            raw = Path(work) / "in.audio"
+            wav = Path(work) / "in.wav"
+            raw.write_bytes(body)
+            convert = subprocess.run(
+                ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(raw),
+                 "-ar", "16000", "-ac", "1", "-sample_fmt", "s16", str(wav)],
+                capture_output=True, text=True, timeout=60)
+            if convert.returncode != 0 or not wav.exists():
+                raise HTTPException(status_code=400,
+                                    detail=f"could not decode the audio: {convert.stderr.strip()[:200]}")
+            # a resident worker keeps the weights in memory; a one-shot process pays ~8 s of load per utterance
+            try:
+                import urllib.request
+
+                request_obj = urllib.request.Request(
+                    "http://127.0.0.1:8091/transcribe", data=wav.read_bytes(),
+                    headers={"content-type": "audio/wav"})
+                with urllib.request.urlopen(request_obj, timeout=60) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+                payload["channel"] = channel
+                payload["path"] = "resident"
+                return payload
+            except Exception:
+                pass                                    # no worker running: fall back to a single process
+
+            run = subprocess.run([str(runtime), str(script), "transcribe", str(wav)],
+                                 capture_output=True, text=True, timeout=180)
+            line = (run.stdout or "").strip().splitlines()[-1] if run.stdout else ""
+            if run.returncode != 0 or not line:
+                raise HTTPException(status_code=503,
+                                    detail=(run.stderr or "transcription failed").strip().splitlines()[-1][:300])
+            try:
+                payload = json.loads(line)
+            except ValueError:
+                raise HTTPException(status_code=503, detail="transcriber returned a bad payload") from None
+            payload["channel"] = channel
+            return payload
+
+    _call_workers: dict = {}
+
+    def _spawn_worker(name: str, port: int, python: Path, script: Path, extra: list[str],
+                      extra_env: dict | None = None) -> dict:
+        """Start a worker if its port is not already answering, then wait for it to report healthy."""
+        import subprocess
+        import time
+        import urllib.request
+
+        def healthy() -> dict | None:
+            try:
+                with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=2) as response:
+                    return json.loads(response.read().decode("utf-8"))
+            except Exception:
+                return None
+
+        state = healthy()
+        if state:
+            return {"worker": name, "port": port, "state": "already running", "health": state}
+        if not python.exists() or not script.exists():
+            return {"worker": name, "port": port, "state": "missing",
+                    "error": f"{python if not python.exists() else script} does not exist"}
+        if port in _call_workers and _call_workers[port].poll() is None:
+            pass
+        else:
+            log_path = Path(tempfile.gettempdir()) / f"athena-{name}-{port}.log"
+            handle = log_path.open("ab")
+            env = dict(os.environ)
+            env.update(extra_env or {})
+            command = [str(python), str(script)] + extra
+            # A worker that inherits this server's cgroup inherits its memory cap too — 4 GiB here, which whisper and
+            # CosyVoice each exceed on their own (the kernel then kills them and the call dies with "two shortages").
+            # A transient scope gives each engine its own budget instead.
+            if shutil.which("systemd-run"):
+                command = ["systemd-run", "--user", "--scope", "--quiet",
+                           f"--unit=athena-{name}-{port}", "-p", "MemoryMax=8G", "--"] + command
+            _call_workers[port] = subprocess.Popen(command,
+                                                   stdout=handle, stderr=subprocess.STDOUT,
+                                                   cwd=str(Path(__file__).resolve().parents[1]), env=env)
+        deadline = time.time() + 150
+        while time.time() < deadline:
+            state = healthy()
+            if state:
+                return {"worker": name, "port": port, "state": "loaded", "health": state}
+            proc = _call_workers.get(port)
+            if proc is not None and proc.poll() is not None:
+                return {"worker": name, "port": port, "state": "exited", "code": proc.returncode,
+                        "log": str(Path(tempfile.gettempdir()) / f"athena-{name}-{port}.log")}
+            time.sleep(1.5)
+        return {"worker": name, "port": port, "state": "timeout"}
+
+    @app.post("/call/prepare")
+    def call_prepare(channel: str = "") -> dict:
+        """Load the engines a call needs — whisper for the user, the cloned voice for the agent — before it starts.
+
+        Starting a worker is idempotent: an already-listening one is reused, so a second call in the same session does
+        not pay the load again. The voice bank of the *selected* agent is what gets loaded.
+        """
+        root_dir = agents_dir.parent
+        lane = channel or "default"
+        bank = manager_root(lane) / "voicebank"
+        results = {}
+
+        def run_asr():
+            return _spawn_worker("asr", 8091, root_dir / "tools" / "voice-runtime" / ".venv" / "bin" / "python",
+                                 Path(__file__).resolve().parents[1] / "scripts" / "asr_server.py",
+                                 ["--port", "8091"])
+
+        def run_tts():
+            return _spawn_worker("tts", 8092,
+                                 root_dir / "tools" / "xtts-runtime" / ".venv" / "bin" / "python",
+                                 Path(__file__).resolve().parents[1] / "scripts" / "tts_server.py",
+                                 ["--port", "8092", "--voicebank", str(bank)],
+                                 # the package is a source tree, not an installed module: it needs to be on the path.
+                                 # CUDA_VISIBLE_DEVICES="" keeps the voice on the CPU so the 8 GB card belongs to
+                                 # whisper — the two engines then cannot fight over memory.
+                                 {})
+
+        results["asr"] = run_asr()
+        results["tts"] = run_tts()          # sequential on purpose: two model loads on one GPU contend
+        results["channel"] = lane
+        results["voicebank"] = str(bank)
+        results["ready"] = results["asr"].get("state") in ("loaded", "already running") and \
+                           results["tts"].get("state") in ("loaded", "already running")
+        return results
+
+    @app.post("/agents/{channel}/speak")
+    def speak_agent(channel: str, payload: dict):
+        """Speak a line in this agent's voice, through the resident voice worker.
+
+        The browser cannot reach the worker directly (it is loopback-only and has no auth), so the server proxies the
+        wav. A worker that is not running is an explicit 503 rather than silence.
+        """
+        import urllib.error
+        import urllib.request
+
+        text = str(payload.get("text") or "").strip()
+        if not text:
+            raise HTTPException(status_code=400, detail="text is required")
+        voice_payload = json.dumps({"text": text[:2000],
+                             "chunk_words": payload.get("chunk_words") or 1,
+                             "crossfade_ms": payload.get("crossfade_ms") or 15}).encode("utf-8")
+        request_obj = urllib.request.Request(
+            "http://127.0.0.1:8092/speak", data=voice_payload,
+            headers={"content-type": "application/json"})
+        try:
+            with urllib.request.urlopen(request_obj, timeout=180) as response:
+                body = response.read()
+                kind = response.headers.get("content-type", "audio/wav")
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", "replace")[:300]
+            if "device-side assert" in detail or "CUDA error" in detail:
+                # the worker killed itself to shed a poisoned CUDA context; bring a fresh one up and try once more
+                try:
+                    _spawn_worker("tts", 8092,
+                                  agents_dir.parent / "tools" / "xtts-runtime" / ".venv" / "bin" / "python",
+                                  Path(__file__).resolve().parents[1] / "scripts" / "tts_server.py",
+                                  ["--port", "8092", "--voicebank", str(agents_dir / channel / "voicebank")], {})
+                    retry_obj = urllib.request.Request(
+                        "http://127.0.0.1:8092/speak", data=voice_payload,
+                        headers={"content-type": "application/json"})
+                    with urllib.request.urlopen(retry_obj, timeout=180) as retry:
+                        body = retry.read()
+                        kind = retry.headers.get("content-type", "audio/wav")
+                    return Response(content=body, media_type=kind if kind.startswith("audio") else "audio/wav")
+                except Exception as second:
+                    raise HTTPException(status_code=503,
+                                        detail=f"voice worker restarted but still failed: {second}") from None
+            raise HTTPException(status_code=502, detail=f"voice worker refused: {detail}") from None
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail=f"voice worker is not available: {exc}") from None
+        return Response(content=body, media_type=kind if kind.startswith("audio") else "audio/wav")
 
     @app.get("/health")
     def health() -> dict:
@@ -763,30 +937,6 @@ def create_app() -> FastAPI:
             result["detail"] = "wake failed: " + "; ".join(f"{k}: {v}" for k, v in failed.items())
         return result
 
-    @app.post("/agents/{channel}/ask/{target}")
-    def ask(channel: str, target: str, req: AskRequest) -> dict:
-        """Turn 1 of the three-pass: queue a question on `target` authored by `channel`.
-
-        The answer comes back as a queued turn on `channel` (turn 3), so the caller is never blocked waiting
-        on another agent — and a loop of agents cannot deadlock, because every step is a queue entry.
-        """
-        known = managers.profiles()
-        if channel not in known:
-            raise HTTPException(status_code=404, detail=f"no agent named {channel!r}")
-        if target not in known:
-            raise HTTPException(status_code=404, detail=f"no agent named {target!r}")
-        if target == channel:
-            raise HTTPException(status_code=400, detail="an agent cannot ask itself")
-        try:
-            queued = managers.enqueue(target, text=req.text, author=channel, hops=0, reply_to=channel)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return {**queued, "exchanges": [
-            {"turn": 1, "who": channel, "does": f"asks @{target}: {req.text[:120]}"},
-            {"turn": 2, "who": target, "does": "answers in its own context"},
-            {"turn": 3, "who": channel, "does": f"receives @{target}'s answer as a queued turn"},
-        ]}
-
     @app.get("/metrics")
     def metrics_summary(limit: int | None = None, channel: str | None = None):
         # a ref, not a directory name — otherwise `?channel=id:<uuid>` reads an empty profile
@@ -796,11 +946,6 @@ def create_app() -> FastAPI:
         """
         from core import metrics as metrics_mod
         return metrics_mod.summary(managers.agents_dir, limit=limit, channel=channel or "")
-
-    @app.get("/metrics/turns")
-    def metrics_turns(limit: int = 50, channel: str | None = None):
-        from core import metrics as metrics_mod
-        return {"turns": metrics_mod.read(managers.agents_dir, limit=limit, channel=channel or "")}
 
     @app.get("/agents/{channel}/metrics")
     def agent_metrics(channel: str, limit: int | None = None):
@@ -835,7 +980,7 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=400, detail="channel name must be alphanumeric, - or _")
         wait = float((cfg.get("agents") or {}).get("turn_wait_s") or 120)
         try:
-            return managers.submit(channel, req.text, wait_s=wait)
+            return managers.submit(channel, req.text, wait_s=wait, mode=req.mode)
         except channels_mod.ChannelAsleep as exc:
             # a state conflict, not a rate limit: the caller must wake the channel
             raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -867,8 +1012,11 @@ def create_app() -> FastAPI:
             if content.startswith(marker) and "] " in content:
                 author, _, rest = content[len(marker):].partition("] ")
                 content = rest
-            entry = {"role": role, "content": content, "ts": msg.get("ts"),
+            shown, mode = _display_content(content)
+            entry = {"role": role, "content": shown, "ts": msg.get("ts"),
                      "direction": direction, "author": author}
+            if mode:
+                entry["mode"] = mode
             if role == "tool":
                 # a tool result is inbound to the agent, and naming the tool is the difference between
                 # "something came back" and "echo came back"
@@ -1118,10 +1266,11 @@ def create_app() -> FastAPI:
             marker = "[from @"
             if content.startswith(marker) and "] " in content:
                 author, _, content = content[len(marker):].partition("] ")
+            content, mode = _display_content(content)
             buckets.setdefault(date, []).append({
                 "role": role, "content": content, "ts": msg.get("ts"),
                 "direction": "outbound" if role == "assistant" else "inbound",
-                "author": author,
+                "author": author, "mode": mode,
                 "live": (msg.get("ts"), role, (msg.get("content") or "")[:200]) in live,
             })
 

@@ -18,6 +18,7 @@ import hashlib
 import json
 from datetime import datetime, timezone
 from pathlib import Path
+from core import timefmt
 
 MAX_ROWS = 4000
 DEFAULT_LIMIT = 200
@@ -42,7 +43,7 @@ def _row_id(row: dict) -> str:
 
 
 def _iso(epoch: float) -> str:
-    return datetime.fromtimestamp(epoch, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return timefmt.stamp_from(epoch)
 
 
 def read_events(security_dir: Path | str, since: float | None = None, limit: int = DEFAULT_LIMIT,

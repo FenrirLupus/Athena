@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from core.root import athena_root
+from core import durable
 
 
 # Credential sidecar (core/credproxy.py). Empty means "sign requests here"; set at boot when the sidecar runs, in
@@ -50,7 +52,7 @@ DEFAULT_BASE_URLS = {
     "anthropic": "https://api.anthropic.com",
 }
 
-ATHENA_ROOT = Path(os.environ.get("ATHENA_ROOT") or (Path.home() / ".athena"))
+ATHENA_ROOT = athena_root()
 SECRET_FILE = ATHENA_ROOT / ".secret"
 
 
@@ -164,28 +166,7 @@ def write_secret(name: str, value: str, root=None) -> Path:
     # `target`, never the module-level SECRET_FILE: with `root=` the write must land in that profile's file.
     # Writing to SECRET_FILE here truncated the GLOBAL secret file and destroyed every other key in it —
     # Writing to the module-level path here truncates the shared secret file and destroys every other key in it.
-    payload = ("\n".join(out) + "\n").encode("utf-8")
-    tmp = target.with_name(target.name + ".tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    try:
-        os.write(fd, payload)
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-    try:
-        os.chmod(tmp, 0o600)
-    except OSError:
-        pass
-    os.replace(tmp, target)
-    try:                                               # the directory entry too, or the rename itself can be lost
-        dir_fd = os.open(target.parent, os.O_RDONLY)
-        try:
-            os.fsync(dir_fd)
-        finally:
-            os.close(dir_fd)
-    except OSError:
-        pass
-    return target
+    return durable.write_secret(target, "\n".join(out) + "\n")
 
 
 def api_key(kind: str, name: str = "", root=None) -> str:
@@ -236,9 +217,6 @@ def api_key(kind: str, name: str = "", root=None) -> str:
     return ""
 
 
-def key_exists(kind: str, name: str = "", root=None) -> bool:
-    """Whether a key resolves, without returning it — for the UI's `has_key` and the wake checks."""
-    return bool(api_key(kind, name, root=root))
 
 
 # -- factory ---------------------------------------------------------------

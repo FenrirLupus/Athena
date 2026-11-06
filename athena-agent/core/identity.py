@@ -20,12 +20,12 @@ Errors are typed so the HTTP layer maps them once instead of every route decidin
 from __future__ import annotations
 
 import json
-import os
 import re
 import threading
-import time
 import uuid
 from pathlib import Path
+from core import timefmt
+from core import durable
 
 IDENTITY = "identity.json"
 LABEL_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
@@ -81,7 +81,7 @@ def _path(root) -> Path:
 
 def _now() -> str:
     """ISO-8601 UTC with a Z — the same format metrics writes for `ts`."""
-    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    return timefmt.stamp()
 
 
 def _valid(record) -> bool:
@@ -138,21 +138,8 @@ def _write(root, record: dict) -> Path:
     root = Path(root)
     root.mkdir(parents=True, exist_ok=True)
     path = root / IDENTITY
-    tmp = path.with_suffix(".tmp")
-    with tmp.open("w", encoding="utf-8") as handle:
-        json.dump(record, handle, indent=1)
-        handle.write("\n")
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.replace(tmp, path)
-    try:                                    # the directory entry too, or the rename can be lost on a crash
-        fd = os.open(root, os.O_RDONLY)
-        try:
-            os.fsync(fd)
-        finally:
-            os.close(fd)
-    except OSError:
-        pass
+    durable.write_state(path, json.dumps(record, indent=1) + "\n")
+    durable.fsync_dir(root)                 # the directory entry too, or the rename can be lost on a crash
     return path
 
 

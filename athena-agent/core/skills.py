@@ -25,6 +25,7 @@ and spends context only on what it opens.
 from __future__ import annotations
 
 from pathlib import Path
+from core import frontmatter
 
 INDEX_LIMIT = 12
 DESC_CHARS = 160
@@ -35,35 +36,8 @@ class SkillError(ValueError):
 
 
 def _frontmatter(text: str) -> tuple[dict, str]:
-    """Split `---` frontmatter from the body. Deliberately not a YAML parser: keys and scalars only."""
-    if not text.startswith("---"):
-        return {}, text
-    end = text.find("\n---", 3)
-    if end == -1:
-        return {}, text
-    head, body = text[3:end], text[end + 4:]
-    meta: dict = {}
-    pending_key = None
-    for raw in head.splitlines():
-        stripped = raw.strip()
-        if pending_key is not None:
-            # a YAML block scalar: `description: >-` followed by indented lines. Without this, every skill written
-            # with a folded description (which is most of them) reported its description as the literal ">-".
-            if raw.startswith((" ", "\t")) and stripped:
-                meta[pending_key] = (str(meta.get(pending_key) or "") + " " + stripped).strip()
-                continue
-            pending_key = None
-        if ":" not in raw or stripped.startswith("#"):
-            continue
-        key, _, value = raw.partition(":")
-        key = key.strip().lower()
-        value = value.strip()
-        if value in (">", ">-", "|", "|-", ">+", "|+"):
-            meta[key] = ""
-            pending_key = key
-            continue
-        meta[key] = value.strip('"').strip("'")
-    return meta, body.lstrip("\n")
+    """Split `---` frontmatter from the body."""
+    return frontmatter.parse(text)
 
 
 def roots(profile_root: Path | None = None, athena_root: Path | None = None,

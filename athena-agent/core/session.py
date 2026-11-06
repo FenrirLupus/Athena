@@ -19,12 +19,13 @@ from __future__ import annotations
 import calendar
 import json
 import os
-import tempfile
 import threading
 import time
 from pathlib import Path
 
 from data.vault import Vault
+from core import timefmt
+from core import durable
 
 
 def _free_name(directory: Path, stamp: str, suffix: str = ".jsonl", prefix: str = "session_") -> str:
@@ -44,20 +45,8 @@ the `session_<date>_<time>` shape and its name states when it was written."""
 
 
 def _atomic_write(path: Path, lines: list[str]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".tmp-", suffix=".jsonl")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write("".join(lines))
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.replace(tmp, path)
-    except Exception:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
+    """Write the transcript so a crash leaves the previous file or the new one, never a mixture."""
+    durable.write_state(path, "".join(lines))
 
 
 class Session:
@@ -100,7 +89,7 @@ class Session:
     # -- api ---------------------------------------------------------------
     def add(self, role: str, content: str, **extra) -> dict:
         msg = {"role": role, "content": content,
-               "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+               "ts": timefmt.stamp()}
         msg.update({k: v for k, v in extra.items() if v is not None})
         with self._lock:
             self.messages.append(msg)

@@ -5,12 +5,6 @@
 (function () {
   var veil, body, status;
 
-  function el(tag, cls, text) {
-    var n = document.createElement(tag);
-    if (cls) n.className = cls;
-    if (text !== undefined) n.textContent = text;
-    return n;
-  }
 
   function field(label, key, value, opts) {
     opts = opts || {};

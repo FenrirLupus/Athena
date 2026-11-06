@@ -66,6 +66,7 @@ import urllib.request
 from pathlib import Path
 
 from tools.registry import Tool
+from core import frontmatter
 
 KINDS = ("script", "command", "http", "builtin")
 MAX_OUTPUT = 20000
@@ -77,39 +78,8 @@ class PackError(ValueError):
 
 
 def _frontmatter(path: Path) -> tuple[dict, str]:
-    """`---` block plus body. Values may be JSON (`{...}`, `[...]`), a quoted string, a number or a bool."""
-    text = path.read_text(encoding="utf-8")
-    meta: dict = {}
-    body = text
-    if text.startswith("---"):
-        end = text.find("\n---", 3)
-        if end != -1:
-            body = text[end + 4:].lstrip("\n")
-            for line in text[3:end].splitlines():
-                if not line.strip() or line.lstrip().startswith("#") or ":" not in line:
-                    continue
-                key, _, value = line.partition(":")
-                meta[key.strip().lower()] = _value(value.strip())
-    return meta, body
-
-
-def _value(raw: str):
-    text = raw.strip()
-    if not text:
-        return ""
-    if text[0] in "{[":
-        try:
-            return json.loads(text)
-        except json.JSONDecodeError:
-            return text
-    if len(text) >= 2 and text[0] == text[-1] and text[0] in "\"'":
-        return text[1:-1]
-    if text.lower() in ("true", "false"):
-        return text.lower() == "true"
-    try:
-        return int(text)
-    except ValueError:
-        return text
+    """Split `---` frontmatter from the body, with values typed from their syntax."""
+    return frontmatter.read(path, typed=True)
 
 
 def discover(profile_root: Path | None = None, athena_root: Path | None = None) -> list[dict]:
@@ -259,7 +229,7 @@ def _run_script(meta: dict, args: dict, folder: Path, cwd: Path) -> dict:
     return {"ok": done.returncode == 0, "exit": done.returncode, "output": out[:MAX_OUTPUT]}
 
 
-def _run_command(meta: dict, args: dict, cwd: Path) -> dict:
+def _run_command(meta: dict, args: dict, folder: Path, cwd: Path) -> dict:
     argv = []
     for part in meta.get("command") or []:
         text = str(part)
@@ -330,7 +300,7 @@ def _tool_from(meta: dict, folder: Path, cwd: Path, env: dict) -> Tool:
         if kind == "script":
             return _run_script(meta, kwargs, folder, cwd)
         if kind == "command":
-            return _run_command(meta, kwargs, cwd)
+            return _run_command(meta, kwargs, folder, cwd)
         return _run_http(meta, kwargs)
 
     return Tool(name=name, description=str(meta.get("description") or f"tool {name}"),

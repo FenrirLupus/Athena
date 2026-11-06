@@ -19,12 +19,12 @@ from __future__ import annotations
 
 import json
 import sys
-import threading
 import time
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from core.jsonio import read_json
 
 MAX_BODY = 8 * 1024 * 1024
 
@@ -33,9 +33,8 @@ def _provider_map(athena_root: Path) -> dict:
     """host → key name, from provider.json when it exists, else from the provider's own name."""
     mapping: dict[str, str] = {}
     catalogue = athena_root / "provider.json"
-    try:
-        data = json.loads(catalogue.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    data = read_json(catalogue, None)
+    if data is None:
         return mapping
     for name, entry in (data or {}).items():
         base = str((entry or {}).get("base_url") or "")

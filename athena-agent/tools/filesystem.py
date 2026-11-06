@@ -40,12 +40,6 @@ class Context:
             raise ToolError(str(exc)) from exc
 
 
-def _human(size: int) -> str:
-    for unit in ("B", "KB", "MB", "GB"):
-        if size < 1024 or unit == "GB":
-            return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
-        size /= 1024.0
-    return f"{size} B"
 
 
 PROTECTED_NAMES = (".secret", "api_token")

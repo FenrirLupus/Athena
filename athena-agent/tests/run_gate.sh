@@ -12,10 +12,10 @@ logdir=$(mktemp -d)
 
 for t in version_check identity_check permissions_check approval_check self_modify_check scope_check install_request_check \
          plugin_install_check tool_install_check box_request_check security_check \
-         tools_skills_plugins toolpacks_check sandbox_and_budget_check subagents_check instruction_docs_check \
-         tools_skills_plugins toolpacks_check outcomes_check subagents_check instruction_docs_check \
+         tools_skills_plugins toolpacks_check sandbox_and_budget_check outcomes_check subagents_check \
+         instruction_docs_check \
          plugin_isolation_check plugins_safety_check admission_check idle_sleep waking_state \
-         routing_check lifecycle_check config_parity lane_plugins_check updater_check ledger_view_check context_window_check comment_style_check publish_safety_check; do
+         routing_check lifecycle_check config_parity lane_plugins_check updater_check ledger_view_check context_window_check comment_style_check publish_safety_check web_assets_check timefmt_check pages_build_check; do
   log="$logdir/$t.log"
   timeout 600 "$PY" "tests/$t.py" >"$log" 2>&1
   code=$?

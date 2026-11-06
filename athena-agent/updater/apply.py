@@ -26,6 +26,7 @@ import zipfile
 from pathlib import Path
 
 from . import channels
+from core import timefmt
 
 TREE_NAME = "athena-agent"
 
@@ -65,20 +66,6 @@ def backup(live: Path, backups_dir: Path, version: str) -> dict:
     return {"zip": str(target), "sha256": digest, "files": len(names)}
 
 
-def restore_backup(archive: Path, live: Path) -> None:
-    """Last resort: rebuild the tree from the zip (used when the previous tree itself is unusable)."""
-    archive, live = Path(archive), Path(live)
-    sidecar = archive.with_suffix(".zip.sha256")
-    if sidecar.is_file():
-        expected = sidecar.read_text(encoding="utf-8").split()[0]
-        actual = hashlib.sha256(archive.read_bytes()).hexdigest()
-        if expected != actual:
-            raise ApplyError(f"{archive.name} does not match its hash — refusing to restore from it")
-    if live.exists():
-        shutil.rmtree(live)
-    live.mkdir(parents=True)
-    with zipfile.ZipFile(archive) as bundle:
-        bundle.extractall(live)
 
 
 # -- server control ------------------------------------------------------------------------------------------------
@@ -201,7 +188,7 @@ def record(state_dir: Path, row: dict) -> None:
     """One JSONL line per attempt, plus the current channel written where a later run can read it."""
     state_dir = Path(state_dir)
     state_dir.mkdir(parents=True, exist_ok=True)
-    line = {"ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), **row}
+    line = {"ts": timefmt.stamp(), **row}
     with open(state_dir / "history.jsonl", "a", encoding="utf-8") as handle:
         handle.write(json.dumps(line, ensure_ascii=False) + "\n")
     current = {"channel": channels.channel_of(row.get("to") or channels.read_version(Path(row["tree"]))

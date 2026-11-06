@@ -14,12 +14,6 @@
   var state = { open: false, paused: false, cursor: 0, filter: "", lines: [] };
   var overlay, log, input, hint, clock;
 
-  function el(tag, cls, text) {
-    var node = document.createElement(tag);
-    if (cls) node.className = cls;
-    if (text !== undefined) node.textContent = text;
-    return node;
-  }
 
   function stamp() {
     var d = new Date();

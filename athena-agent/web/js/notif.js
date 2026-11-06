@@ -7,12 +7,6 @@
   var READ = "athena.notif.read", GONE = "athena.notif.deleted";
   var bell, panel, list;
 
-  function el(tag, cls, text) {
-    var n = document.createElement(tag);
-    if (cls) n.className = cls;
-    if (text !== undefined) n.textContent = text;
-    return n;
-  }
   function load(key) { try { return JSON.parse(localStorage.getItem(key) || "[]"); } catch (e) { return []; } }
   function save(key, value) { try { localStorage.setItem(key, JSON.stringify(value)); } catch (e) { } }
 

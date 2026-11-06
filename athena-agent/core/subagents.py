@@ -21,7 +21,6 @@ Four rules, each a way this could otherwise go wrong:
 """
 from __future__ import annotations
 
-import json
 import re
 import sqlite3
 import sys

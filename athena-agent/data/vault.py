@@ -8,8 +8,8 @@ from __future__ import annotations
 
 import sqlite3
 import threading
-import time
 from pathlib import Path
+from core import timefmt
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS messages (
@@ -71,7 +71,7 @@ class Vault:
         """Copy a batch of turns into the vault. Returns how many rows were written."""
         if not messages:
             return 0
-        now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        now = timefmt.stamp()
         rows = [(self.channel, snapshot, m.get("role", ""), m.get("content", "") or "",
                  m.get("ts"), m.get("tool_call_id"), m.get("name"), now)
                 for m in messages]

@@ -14,6 +14,8 @@ import sys
 import time
 from pathlib import Path
 from core.context_window import effective_window
+from core import timefmt
+from core.root import athena_root as athena_root_path
 
 
 def pathlib_root(root):
@@ -56,10 +58,9 @@ def main(argv: list[str] | None = None) -> int:
         from core import metrics as metrics_mod
         from config import loader
         cfg = loader.load()
-        # os.path, not Path: this function has local `from pathlib import Path` imports further down, which
+        # os.path.join, not Path: this function has local `from pathlib import Path` imports further down, which
         # make the name local to the whole function and raise UnboundLocalError here
-        root = os.path.join(os.environ.get("ATHENA_ROOT") or os.path.join(os.path.expanduser("~"), ".athena"),
-                            "profiles")
+        root = os.path.join(str(athena_root_path()), "profiles")
         limit = None
         channel = ""
         for i, arg in enumerate(argv):
@@ -467,7 +468,7 @@ def main(argv: list[str] | None = None) -> int:
                 print("no ledger rows match")
                 return 0
             for row in rows[-limit:]:
-                stamp = _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime(float(row.get("at") or 0)))
+                stamp = timefmt.stamp_from(float(row.get("at") or 0))
                 who = row.get("agent_id") or row.get("lane") or ""
                 print(f"{stamp}  {row.get('team',''):<4} {row.get('kind',''):<26} {who:<40} {row.get('detail','')[:80]}")
             return 0

@@ -23,6 +23,7 @@ import re
 import shutil
 import time
 from pathlib import Path
+from core.jsonio import read_json
 
 MANIFEST = "PLUGIN.md"
 INSTALL_LOG = "installs.json"
@@ -70,7 +71,6 @@ def _read_manifest(folder: Path) -> dict:
             f"something a plugin can ship yet — drop it from `provides` so the manifest says what actually happens")
     # A plugin that ships only skills or data has no entry script; requiring one would make a repository of markdown
     # impossible to install, which is exactly what a "skills bundle" is.
-    needs_entry = "tools" in provides or not (meta.get("entry") == "" and "skills" in provides)
     entry = str(meta.get("entry") or "").strip()
     if "tools" in provides:
         entry = entry or "scripts/plugin.py"
@@ -186,10 +186,6 @@ LOCK = "requirements.lock"
 SEED = "athena-server.pth"
 
 
-def venv_python(dest: Path) -> Path | None:
-    """The interpreter for a plugin that declares dependencies, or None when it needs none."""
-    candidate = Path(dest) / VENV / "bin" / "python3"
-    return candidate if candidate.exists() else None
 
 
 def _seed_shared_stack(target: Path) -> str:
@@ -369,10 +365,7 @@ def install(staged: Path, plugins_root: Path, athena_root: Path, *, force: bool 
               "environment": environment, "files": files}
     log_path = athena_root / "security" / INSTALL_LOG
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        existing = json.loads(log_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        existing = {}
+    existing = read_json(log_path, {})
     existing[name] = record
     log_path.write_text(json.dumps(existing, indent=1), encoding="utf-8")
 
@@ -452,10 +445,7 @@ def uninstall(name: str, plugins_root: Path, athena_root: Path) -> dict:
     (retired / "MANIFEST.sha256").write_text("\n".join(manifest_lines) + "\n", encoding="utf-8")
 
     log_path = Path(athena_root) / "security" / INSTALL_LOG
-    try:
-        records = json.loads(log_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        records = {}
+    records = read_json(log_path, {})
     record = records.pop(name, None)
     if record is not None:
         log_path.write_text(json.dumps(records, indent=1), encoding="utf-8")
@@ -468,10 +458,7 @@ def uninstall(name: str, plugins_root: Path, athena_root: Path) -> dict:
 def installed(plugins_root: Path, athena_root: Path) -> list[dict]:
     """What is installed, according to the install log rather than the directory listing."""
     log_path = Path(athena_root) / "security" / INSTALL_LOG
-    try:
-        records = json.loads(log_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return []
+    records = read_json(log_path, {})   # a dict: the loop reads .items()
     rows = []
     for name, record in sorted(records.items()):
         folder = Path(plugins_root) / name
@@ -496,10 +483,7 @@ def _pending_path(athena_root: Path) -> Path:
 
 def _load_pending(athena_root: Path) -> dict:
     path = _pending_path(athena_root)
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
+    return read_json(path, {})
 
 
 def _save_pending(athena_root: Path, rows: dict) -> None:
@@ -518,10 +502,7 @@ def _fingerprint(folder: Path) -> str:
 
 def _answers(athena_root: Path) -> dict:
     path = _pending_path(athena_root).parent / DENIED
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
+    return read_json(path, {})
 
 
 def _remember_answer(athena_root: Path, folder: Path, decision: str) -> None:
@@ -594,11 +575,8 @@ def _install_state(name: str, staged: Path, athena_root: Path, plugins_root: Pat
                 "detail": "not installed"}
 
     drifted, missing = [], []
-    try:
-        records = json.loads((Path(athena_root) / "security" / INSTALL_LOG).read_text(encoding="utf-8"))
-        expected = (records.get(name) or {}).get("files") or {}
-    except (OSError, json.JSONDecodeError):
-        expected = {}
+    records = read_json(Path(athena_root) / "security" / INSTALL_LOG, {})
+    expected = (records.get(name) or {}).get("files") or {}
     for rel, record in expected.items():
         target = installed / rel
         if not target.is_file():
@@ -845,10 +823,7 @@ def install_tool(staged: Path, tools_root: Path, athena_root: Path, *, force: bo
               "files": files}
     log_path = Path(athena_root) / "security" / INSTALL_LOG
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        existing = json.loads(log_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        existing = {}
+    existing = read_json(log_path, {})
     existing[f"tool:{name}"] = record
     log_path.write_text(json.dumps(existing, indent=1), encoding="utf-8")
 
@@ -879,12 +854,15 @@ PACKAGE_RE = re.compile(r"^[a-z0-9][a-z0-9+.-]{0,60}$")
 
 
 def _box_allowed(athena_root: Path) -> bool:
+    """Whether box installs are permitted, read through the config parser so a commented or nested key is not missed."""
+    from config import loader
+
     try:
-        text = (Path(athena_root) / "config.yaml").read_text(encoding="utf-8")
-    except OSError:
+        cfg = loader.load_file(Path(athena_root) / "config.yaml")
+    except Exception:                                    # noqa: BLE001 — an unreadable config means no
         return False
-    match = re.search(r"^\s*allow_box_installs:\s*(true|false)\s*$", text, re.M | re.I)
-    return bool(match and match.group(1).lower() == "true")
+    security = cfg.get("security") or {}
+    return bool(security.get("allow_box_installs"))
 
 
 def _box_packages(raw) -> list[str]:
@@ -941,10 +919,7 @@ def install_box(packages, athena_root: Path, *, dry_run: bool = False, timeout: 
     record = {"at": int(time.time()), "packages": names, "ok": done.returncode == 0, "dry_run": dry_run,
               "exit": done.returncode, "output": "\n".join(tail)[:4000]}
     log = Path(athena_root) / "security" / BOX_LOG
-    try:
-        existing = json.loads(log.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        existing = []
+    existing = read_json(log, [])
     existing.append(record)
     log.write_text(json.dumps(existing[-50:], indent=1), encoding="utf-8")
     return record
@@ -982,10 +957,7 @@ def uninstall_tool(name: str, tools_root: Path, athena_root: Path) -> dict:
     (retired / "MANIFEST.sha256").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     log_path = Path(athena_root) / "security" / INSTALL_LOG
-    try:
-        records = json.loads(log_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        records = {}
+    records = read_json(log_path, {})
     if records.pop(f"tool:{name}", None) is not None:
         log_path.write_text(json.dumps(records, indent=1), encoding="utf-8")
 

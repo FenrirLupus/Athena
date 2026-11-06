@@ -6,12 +6,6 @@
 (function () {
   var order = 1;   // 1 = A–Z, -1 = Z–A
 
-  function el(tag, cls, text) {
-    var n = document.createElement(tag);
-    if (cls) n.className = cls;
-    if (text !== undefined) n.textContent = text;
-    return n;
-  }
 
   function titleOf(block) {
     var h = block.querySelector(".block-head h2, h2, h3");

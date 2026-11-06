@@ -21,7 +21,7 @@ import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import _boot  # noqa: F401 — puts the project root on sys.path
 
 from updater import apply as apply_mod
 from updater import channels, source as source_mod, wizard

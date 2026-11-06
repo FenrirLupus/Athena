@@ -11,7 +11,6 @@ the pricing stays the operator's setting.
 """
 from __future__ import annotations
 
-import json
 
 from providers.base import BaseProvider
 

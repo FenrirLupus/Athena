@@ -10,7 +10,7 @@ import tempfile
 import time
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import _boot  # noqa: F401 — puts the project root on sys.path
 
 from config import loader
 from core import mentions
@@ -50,7 +50,9 @@ def got_from(channel, author, needle=""):
                for m in history)
 
 
-with tempfile.TemporaryDirectory() as td:
+# the manager's daemon workers outlive this block, so a strict teardown raises "Directory not empty"; the
+# assertions below already ran, and a leaked temp directory is cheaper than a flaky gate
+with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as td:
     root = Path(td) / "profiles"
     root.mkdir()
     mgr = ChannelManager(cfg, MockProvider(), treg.default_registry(cfg), root)

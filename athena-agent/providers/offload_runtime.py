@@ -22,7 +22,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 import time
 from pathlib import Path
 
@@ -46,9 +45,9 @@ STARTED_AT = time.time()
 # without torch. This script is run as a file (sys.path[0] = providers/) and imported as a module when
 # the multiplexer loads it, so both import paths are supported.
 try:
-    from providers.tool_calls import parse_tool_calls, strip_thinking
+    from providers.tool_calls import parse_tool_calls
 except ImportError:                                   # executed as a script
-    from tool_calls import parse_tool_calls, strip_thinking
+    from tool_calls import parse_tool_calls
 
 
 def budgets(plan: dict) -> dict:

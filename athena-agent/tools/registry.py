@@ -9,10 +9,11 @@ from __future__ import annotations
 import json
 import threading
 from pathlib import Path
+from core.root import athena_root
 
 # Tools may read what an agent was given, and nothing else. Attachments land in
 # `profiles/<channel>/workspace/`, so that is the one tree a file tool is allowed to open.
-WORKSPACE_ROOT = Path(__import__("os").environ.get("ATHENA_ROOT") or (Path.home() / ".athena")) / "profiles"
+WORKSPACE_ROOT = athena_root() / "profiles"
 READ_CAP_BYTES = 200_000
 
 

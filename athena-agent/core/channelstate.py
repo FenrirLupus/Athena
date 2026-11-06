@@ -26,6 +26,8 @@ import json
 import os
 import time
 from pathlib import Path
+from core.jsonio import read_json
+from core import durable
 
 FILENAME = "state.json"
 
@@ -69,10 +71,7 @@ def path(profile_root: Path) -> Path:
 
 def read(profile_root: Path) -> dict:
     """The last recorded state, or {} when there is none (a profile that has never run)."""
-    try:
-        data = json.loads(path(profile_root).read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
+    data = read_json(path(profile_root), {})
     return data if isinstance(data, dict) else {}
 
 
@@ -82,9 +81,7 @@ def write(profile_root: Path, state: str, **extra) -> dict:
     target = path(profile_root)
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
-        temp = target.with_suffix(".json.tmp")
-        temp.write_text(json.dumps(record, indent=2), encoding="utf-8")
-        os.replace(temp, target)
+        durable.write_state(target, json.dumps(record, indent=2))
     except OSError:
         pass
     return record

@@ -7,12 +7,6 @@
   var bar, card, agents = [], selected = null, current = null, order = 1;
   var tabsBox, search, sortButton, query = "";
 
-  function el(tag, cls, text) {
-    var n = document.createElement(tag);
-    if (cls) n.className = cls;
-    if (text !== undefined) n.textContent = text;
-    return n;
-  }
 
   function row(label, value, opts) {
     opts = opts || {};
@@ -32,7 +26,7 @@
 
   var registry = { providers: {} };
 
-  // A vendor is a name, an endpoint and the format used to speak to it. DeepSeek speaks the OpenAI format, so the
+  // A vendor is a name, an endpoint and the wire format it speaks. DeepSeek speaks the OpenAI format, so the
   // profile is written with `openai` while the user picks "DeepSeek" — the field means format, the list means vendor.
   var PRESETS = {
     DeepSeek: { url: "https://api.deepseek.com/v1", format: "openai" },

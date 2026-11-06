@@ -35,6 +35,12 @@ model:
     # Which server to start: transformers (tiered GPU/CPU/disk), vllm, llamacpp (a GGUF), or command.
     backend: transformers
 
+    # Layers to keep resident on the GPU once the load finishes; the loader's own figure is halved for warmup.
+    promote_layers: 32
+
+    # Memory held back for the KV cache while promoting layers, in MB.
+    promote_reserve_mb: 1600
+
     # Downloaded model to serve: the folder name under .athena/models (see `athena models list`).
     name: ""
 
@@ -240,3 +246,8 @@ security:
       - api.deepseek.com
       - huggingface.co
       - cdn-lfs.huggingface.co
+
+call:
+  # Prompt budget for a spoken turn. A voice exchange needs the last few exchanges, not the thread, and a
+  # smaller prompt is answered sooner; chat is unaffected because it never sets this mode.
+  prompt_budget_tokens: 4000

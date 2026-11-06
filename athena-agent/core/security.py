@@ -27,6 +27,8 @@ import os
 import threading
 import time
 from pathlib import Path
+from core.jsonio import read_json
+from core import durable
 
 BASELINE_NAME = "baseline.json"
 LEDGER_NAME = "events.jsonl"
@@ -180,20 +182,15 @@ class Baseline:
                 "sha256": _sha256(path), "bytes": stat.st_size, "mode": oct(stat.st_mode)[-3:],
                 "mtime": int(stat.st_mtime)}
         data = {"built_at": time.time(), "root": str(self.athena_root), "files": rows}
-        tmp = self.path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(data, indent=1), encoding="utf-8")
-        os.replace(tmp, self.path)
+        durable.write_state(self.path, json.dumps(data, indent=1))
         try:
-            os.chmod(self.path, 0o400)
+            os.chmod(self.path, 0o400)      # read-only once written: the baseline is evidence, not a working file
         except OSError:
             pass
         return {"files": len(rows), "path": str(self.path)}
 
     def load(self) -> dict:
-        try:
-            return json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return {}
+        return read_json(self.path, {})
 
 
 def classify(rel_path: str, ledger: Ledger, window_s: float = 3600.0) -> tuple[str, str]:

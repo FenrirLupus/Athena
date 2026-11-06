@@ -59,7 +59,6 @@ def to_openai(messages: list[dict]) -> list[dict]:
     out: list[dict] = []
     for msg in messages:
         role = msg.get("role") or "user"
-        content = msg.get("content")
         if role == "tool":
             out.append({"role": "tool",
                         "tool_call_id": msg.get("tool_call_id") or "",

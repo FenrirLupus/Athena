@@ -1,6 +1,6 @@
 # Athena — the code
 
-Version **0.0.1**. A multiplexer that keeps every agent resident, each running an iterative turn
+Version **0.0.2** (alpha). A multiplexer that keeps every agent resident, each running an iterative turn
 loop. See `CHANGELOG.md` for what this version does and does not include, and
 `../documentation/` for why any of it is shaped this way.
 
@@ -98,5 +98,16 @@ athena.bat
 
 ## Not here yet
 
-Memory store, compression, identity write gates, auth, the update system, autonomy, hive routing.
-`CHANGELOG.md` lists them as the 0.0.2+ queue.
+**Autonomy** — an agent that decides what to do next without being asked. Everything else this file used to list
+here is built, and each has a module you can read:
+
+| capability | where it lives |
+|---|---|
+| memory index | `core/profile.py` (`memories/MEMORY.md`, read by `context/stack.py`) — it renders, but nothing writes rows yet |
+| compression | `context/compress.py`, `context/digest.py` |
+| identity write gates | `core/identity.py`, `core/paths.py` |
+| auth | `core/netdefense.py` (`x-athena-token`, `athena_session` cookie) |
+| update system | `updater/` (`athena.sh update`) |
+| hive routing | `server/routing.py`, `core/mentions.py` |
+
+`CHANGELOG.md` records what each version includes and what it deliberately leaves out.

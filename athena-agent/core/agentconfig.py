@@ -19,10 +19,10 @@ from __future__ import annotations
 
 import colorsys
 import random
-import os
 from pathlib import Path
 
 import yaml
+from core import durable
 
 FILENAME = "config.yaml"          # the SAME filename as the global config — one name, one schema
 LEGACY_FILENAME = "agent.yaml"    # the pre-rename name; still read, migrated on first load
@@ -76,12 +76,7 @@ def _write_atomic(target: Path, text: str) -> None:
     """tmp + fsync + replace. A `write_text` torn by a crash leaves YAML that `read()` swallows as `{}`, so the agent
     silently falls back to the global provider and loses its persona with no error anywhere."""
     target.parent.mkdir(parents=True, exist_ok=True)
-    tmp = target.with_name(target.name + ".tmp")
-    with open(tmp, "w", encoding="utf-8") as handle:
-        handle.write(text)
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.replace(tmp, target)
+    durable.write_state(target, text)
 
 
 def _hue_of(colour: str) -> float | None:
@@ -500,13 +495,13 @@ def write_identity(profile_root: Path, persona: dict) -> Path:
             "---", "", "# Who I am", ""]
     body.append(f"I am {name}.")
     if role:
-        body.append(f"")
+        body.append("")
         body.append(role[0].upper() + role[1:])
     if tone:
-        body.append(f"")
+        body.append("")
         body.append(f"I speak this way: {tone}.")
     if boundaries:
-        body.append(f"")
+        body.append("")
         # "never guesses a fact" must not become "I do not: never guesses a fact" — state the limit as a
         # limit, with the persona's own wording kept intact
         body.append(f"I must never: {boundaries.rstrip('.')}.")

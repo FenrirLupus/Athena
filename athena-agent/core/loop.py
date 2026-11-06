@@ -12,10 +12,10 @@ Invariants kept from that document:
 """
 from __future__ import annotations
 
+import re as mode_mod
 import time
 import traceback
 
-from context import compress as compress_mod
 from context import stack as stack_mod
 from core.budget import IterationBudget
 from core.context_window import effective_window
@@ -34,6 +34,7 @@ class TurnResult(dict):
 def run_turn(*, channel: str, channel_root, session, provider, tools_registry,
              instructions: str, user_text: str, cfg: dict,
              budget: IterationBudget | None = None,
+             mode: str = "chat",
              interrupts=None) -> TurnResult:
     """Run one turn. `interrupts` is an optional callable returning notices that arrived mid-turn.
 
@@ -123,6 +124,19 @@ def run_turn(*, channel: str, channel_root, session, provider, tools_registry,
             messages, report = stack_mod.build(
                 live_instructions, channel_root, session.history(), user_text, cfg,
                 summary=session.summary_text(), factor=factor)
+            # A prompt is paid for on every turn, so its size is a latency setting, not just a storage one: a
+            # large context window made "compress when nearly full" mean "never", and every reply carried the
+            # whole transcript. Oldest turns are dropped to meet the budget; the system block and the newest
+            # message are never dropped, so the agent keeps its instructions and the question it was asked.
+            # Call mode only: a spoken exchange needs the last few turns, not the whole thread. Chat keeps its
+            # history untouched, because there the earlier conversation is the point.
+            prompt_budget = 0
+            if mode == "call":
+                prompt_budget = int((cfg.get("call") or {}).get("prompt_budget_tokens") or 0)
+            if prompt_budget > 0:
+                trimmed = _trim_to_budget(messages, prompt_budget)
+                if trimmed:
+                    notes.append(f"trimmed {trimmed} older message(s) to fit a {prompt_budget}-token prompt budget")
             last_report = report
             # keep the assembled system block so "what was the model actually told" is answerable
             # without trusting the model's account of its own instructions
@@ -141,9 +155,19 @@ def run_turn(*, channel: str, channel_root, session, provider, tools_registry,
                 # NOT a system message: appending one mid-conversation is the trap doc 02 names, and a
                 # template that requires "system first" then rejects every later turn. The failure is
                 # reported in the turn result and the log, never injected into the transcript.
-                print(f"model call failed: {exc}", file=__import__("sys").stderr)
-                status = "error_api"
-                reply = f"model call failed: {exc}"
+                text = str(exc)
+                print(f"model call failed: {text}", file=__import__("sys").stderr)
+                # A provider that has run out of credit answers 402, and that is not a bug in the turn: it is a
+                # state the operator has to change. It gets its own status so nothing retries it as if it were a
+                # transient API fault, and so the interface can say what to do rather than echoing a stack line.
+                if "402" in text or "insufficient" in text.lower() or "quota" in text.lower():
+                    status = "error_balance"
+                    reply = ("The provider refused this turn: the account has no remaining balance. "
+                             "Top up the provider, or point this agent at a local model "
+                             "(model.provider: local in its config.yaml).")
+                else:
+                    status = "error_api"
+                    reply = f"model call failed: {text}"
                 break
 
             call_usage = resp.get("usage") or {}
@@ -203,7 +227,8 @@ def run_turn(*, channel: str, channel_root, session, provider, tools_registry,
                 break
 
             # the model asked for tools: record the call, run each, answer every one
-            session.add_assistant_tool_calls(content, tool_calls)
+            session.add_assistant_tool_calls(mode_mod.sub(r"^\s*\[(?:Voice|Message)\]\s*", "", content or ""),
+                                             tool_calls)
             tool_rounds += 1
             for call in tool_calls:
                 call_id = call.get("id") or f"call_{tool_rounds}_{len(call)}"
@@ -224,7 +249,11 @@ def run_turn(*, channel: str, channel_root, session, provider, tools_registry,
         reply = ("I ran out of budget before finishing. Here is where I got to: "
                  f"{tool_rounds} tool round(s), {calls} model call(s).")
 
-    session.add("assistant", reply)
+    # The marker is ours to write, not the model's: the agent reads the marked history and will imitate the prefix,
+    # so one the model emits is removed before it is stored, spoken or shown. The marker is then added exactly once.
+    if reply:
+        reply = __import__("re").sub(r"^\s*\[(?:Voice|Message)\]\s*", "", reply)
+    session.add("assistant", ("[Voice] " if mode == "call" else "[Message] ") + reply if reply else reply)
     return TurnResult({
         "channel": channel,
         "status": status,
@@ -241,6 +270,32 @@ def run_turn(*, channel: str, channel_root, session, provider, tools_registry,
         "usage": usage_totals,
         "model_calls": model_calls,
     })
+
+
+def _estimate_tokens(messages) -> int:
+    """Approximate the prompt size a provider will bill for."""
+    total = 0
+    for message in messages:
+        content = message.get("content")
+        if isinstance(content, str):
+            total += len(content)
+        elif isinstance(content, list):
+            for part in content:
+                total += len(str(part.get("text") or ""))
+        total += 8                                  # per-message framing
+    return int(total / 2.5)                         # calibrated to what the provider bills, not to a guess
+
+
+def _trim_to_budget(messages, budget):
+    """Drop the oldest non-system messages until the prompt fits the budget, keeping the newest one."""
+    dropped = 0
+    while len(messages) > 2 and _estimate_tokens(messages) > budget:
+        drop_at = 1 if messages[0].get("role") == "system" else 0
+        if drop_at >= len(messages) - 1:
+            break
+        messages.pop(drop_at)
+        dropped += 1
+    return dropped
 
 
 def _maybe_compress(session, cfg: dict, factor: float = 1.0, provider=None,

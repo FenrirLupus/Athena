@@ -8,13 +8,12 @@ Rules (documentation/architecture/08-config.md):
 """
 from __future__ import annotations
 
-import os
 from pathlib import Path
-from typing import Any
 
 import yaml
+from core.root import athena_root
 
-ATHENA_ROOT = Path(os.environ.get("ATHENA_ROOT") or (Path.home() / ".athena"))
+ATHENA_ROOT = athena_root()
 AGENT_DIR = ATHENA_ROOT / "athena-agent"
 DEFAULT_CONFIG = AGENT_DIR / "config" / "defaults.yaml"
 USER_CONFIG = ATHENA_ROOT / "config.yaml"
@@ -149,11 +148,16 @@ def render_full(effective: dict, template: Path | None = None) -> str:
 
 def write_full(effective: dict, path: Path | None = None) -> Path:
     """Write the effective config to `path` (default: the user's config.yaml), fully populated."""
-    root = Path(os.environ.get("ATHENA_ROOT") or (Path.home() / ".athena"))
+    root = athena_root()
     target = path or (root / "config.yaml")
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(render_full(effective), encoding="utf-8")
     return target
+
+
+def load_file(path) -> dict:
+    """Parse one config file with the same rules as the effective config; empty when it cannot be read."""
+    return _load_yaml(Path(path)) or {}
 
 
 def load() -> dict:

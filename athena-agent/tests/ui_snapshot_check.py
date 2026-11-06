@@ -43,6 +43,7 @@ import re
 import sys
 import time
 from pathlib import Path
+from core import timefmt
 
 ROOT = Path(__file__).resolve().parents[1]
 WEB = ROOT / "web" / "css"
@@ -177,7 +178,7 @@ def record(force: bool) -> int:
         print(f"{BASELINE} already exists — pass --force to overwrite the baseline", file=sys.stderr)
         return 2
     BASELINE.parent.mkdir(parents=True, exist_ok=True)
-    payload = {"version": 1, "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    payload = {"version": 1, "recorded_at": timefmt.stamp(),
                "count": len(found), "raw_literals": raw, "declarations": dict(sorted(found.items()))}
     BASELINE.write_text(json.dumps(payload, indent=1, sort_keys=True) + "\n", encoding="utf-8")
     per_file = " · ".join(f"{name} {counts.get(name, 0)}" for name in SHEETS)

@@ -37,6 +37,9 @@ import subprocess
 import threading
 import time
 from pathlib import Path
+from core import timefmt
+from core.jsonio import read_json
+from core import durable
 
 _LOCK = threading.RLock()      # re-entrant: record() may fold inside its own critical section
 
@@ -87,7 +90,7 @@ def record(root: Path | str, entry: dict) -> dict:
     row = {key: entry.get(key) for key in FIELDS}
     # "" not None: a filter comparing against an empty string is a filter, one comparing against null is a bug
     row["agent_id"] = row.get("agent_id") or ""
-    row["ts"] = row["ts"] or time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    row["ts"] = row["ts"] or timefmt.stamp()
     target = path_for(root, row.get("channel") or "")
     target.parent.mkdir(parents=True, exist_ok=True)
     line = json.dumps(row, ensure_ascii=False, default=str)
@@ -194,7 +197,7 @@ def sample_resources(model_hint: str = "") -> dict:
         if total:
             sample["model_rss_mb"] = sum(total)
             sample["model_pids"] = len(pids)
-    sample["sampled_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    sample["sampled_at"] = timefmt.stamp()
     return sample
 
 
@@ -254,24 +257,17 @@ def _fold(root: Path | str, channel: str, *, keep: int = 1000,
     # the fold: one entry per rollup, with the same aggregates the summary reports
     bucket = _bucket(archived)
     ledger_target = rollup_path(root, channel)
-    try:
-        ledger = json.loads(ledger_target.read_text(encoding="utf-8"))
-        if not isinstance(ledger, dict):
-            raise ValueError
-    except (OSError, ValueError, json.JSONDecodeError):
+    ledger = read_json(ledger_target, None)
+    if not isinstance(ledger, dict):
         ledger = {"channel": channel, "periods": []}
     ledger["periods"].append({"period": time.strftime("%Y-%m", time.gmtime()), **bucket,
                               "first": manifest.get("first"), "last": manifest.get("last")})
     ledger["totals"] = _sum_buckets([*ledger.get("periods", [])])
-    ledger["updated"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    ledger["updated"] = timefmt.stamp()
 
-    tmp_ledger = ledger_target.with_suffix(".tmp")
-    tmp_ledger.write_text(json.dumps(ledger, indent=2), encoding="utf-8")
-    os.replace(tmp_ledger, ledger_target)
+    durable.write_state(ledger_target, json.dumps(ledger, indent=2))
 
-    tmp_raw = target.with_suffix(".tmp")
-    tmp_raw.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in kept), encoding="utf-8")
-    os.replace(tmp_raw, target)                     # atomic: the raw log is either old or new, never half
+    durable.write_state(target, "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in kept))
     return {"channel": channel, "rolled": len(archived), "kept": len(kept),
             "raw_rows": len(kept), "archived_file": manifest.get("archived_file"),
             "rollup": str(ledger_target)}
@@ -302,7 +298,6 @@ def _pct(values: list[float], p: float) -> float | None:
 
 def _bucket(rows: list[dict]) -> dict:
     seconds = [r.get("seconds") for r in rows if r.get("seconds") is not None]
-    speeds = [r.get("tokens_per_second") for r in rows if r.get("tokens_per_second")]
     # paired, not summed independently: a row written before `inference_seconds` existed has tokens but no
     # time, and mixing the two pools counted its tokens against other rows' seconds (scout read 1.46 tok/s
     # when the honest figure was 0.98)
@@ -337,9 +332,8 @@ def _archived_totals(root: Path | str, channel: str = "") -> dict:
                             "cost_usd", "wall_seconds", "tool_rounds", "truncated_calls")}
     periods = 0
     for ch in channels:
-        try:
-            ledger = json.loads(rollup_path(root, ch).read_text(encoding="utf-8"))
-        except (OSError, ValueError, json.JSONDecodeError):
+        ledger = read_json(rollup_path(root, ch), None)
+        if not isinstance(ledger, dict):
             continue
         periods += len(ledger.get("periods") or [])
         for k, v in (ledger.get("totals") or {}).items():

@@ -6,10 +6,11 @@ behaviour-preserving. The rules come from doc 19 §2 and the queue section of do
 import copy
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import _boot  # noqa: F401 — puts the project root on sys.path
 
 from config import loader
 from core import channelstate
@@ -99,7 +100,17 @@ with tempfile.TemporaryDirectory() as td:
     # --- enqueue wakes a sleeping channel ----------------------------------
     force(mgr.channel("beta", ensure=True), "sleeping")
     mgr.enqueue("beta", "wake up please")
-    checks["enqueue_wakes_sleeping"] = mgr.channel("beta", ensure=True).state in ("idle", "queued", "working")
+    # the state is transient — the turn runs and the lane may be back asleep by the next instruction — so this
+    # asserts what the behaviour is for: the queued message was actually picked up and answered
+    woke = time.time() + 10
+    while time.time() < woke:
+        with mgr.channel("beta", ensure=True)._lock:
+            seen = any("wake up please" in (m.get("content") or "")
+                       for m in mgr.channel("beta", ensure=True).session.history())
+        if seen:
+            break
+        time.sleep(0.05)
+    checks["enqueue_wakes_sleeping"] = seen
 
     # --- submit runs and returns the turn ----------------------------------
     result = mgr.submit("alpha", "hello there", wait_s=20)
@@ -117,8 +128,14 @@ with tempfile.TemporaryDirectory() as td:
         history = mgr.channel("alpha", ensure=True).session.history()
     # startswith, not "in": an interrupt notice quotes the message it announces, and a substring match
     # counted those as turns (the ordering itself was correct)
-    order = [m["content"] for m in history
-             if m.get("role") == "user" and (m.get("content") or "").startswith("ordered ")]
+    def spoken(text):
+        """A turn is stored with its mode marker in front; the order is about the words, not the marker."""
+        for marker in ("[Message] ", "[Voice] "):
+            if text.startswith(marker):
+                return text[len(marker):]
+        return text
+    order = [spoken(m["content"]) for m in history
+             if m.get("role") == "user" and spoken(m.get("content") or "").startswith("ordered ")]
     checks["fifo_order"] = order == ["ordered 0", "ordered 1", "ordered 2"]
 
     # --- notices while working ---------------------------------------------
@@ -158,6 +175,31 @@ with tempfile.TemporaryDirectory() as td:
     # --- the queue survives a refused turn start ---------------------------
     mgr.set_state(mgr.channel("alpha", ensure=True), "idle")
     _ = mgr.submit("alpha", "after everything", wait_s=20)
+
+    # --- two jobs queued in the same window both run -----------------------
+    # the worker drains both queues until empty and only then sleeps, so a second job queued while the first is
+    # still running is picked up rather than left waiting for a wake that already happened
+    lane = mgr.channel("alpha", ensure=True)
+    with lane._lock:
+        before_turns = lane.turns
+    mgr.enqueue("alpha", "burst one")
+    mgr.enqueue("alpha", "burst two")
+    deadline = time.time() + 20
+    while time.time() < deadline and lane.turns < before_turns + 2:
+        time.sleep(0.05)
+    checks["burst_not_lost"] = lane.turns >= before_turns + 2
+
+    # --- stop() answers a queued caller instead of letting it time out ------
+    closing = mgr.channel("gamma", ensure=True)
+    answered = threading.Event()
+    closing.queue.put({"text": "never runs", "done": answered, "queued_at": time.time(), "mode": "chat"})
+    mgr.admission.stop(closing)
+    checks["stop_answers_queued"] = answered.wait(2.0)
+
+    # --- stop() marks the channel so a parked worker exits -----------------
+    retiring = mgr.channel("beta", ensure=True)
+    mgr.admission.stop(retiring)
+    checks["stop_marks_channel"] = bool(getattr(retiring, "stopping", False))
 
 for name, passed in checks.items():
     print(f"  {'PASS' if passed else 'FAIL'}  {name}")

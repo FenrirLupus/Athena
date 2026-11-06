@@ -11,13 +11,13 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 from pathlib import Path
 
 from . import channels, wizard
+from core.root import athena_root
 
-DEFAULT_ROOT = Path(os.environ.get("ATHENA_ROOT") or Path.home() / ".athena")
+DEFAULT_ROOT = athena_root()
 
 
 def build_parser() -> argparse.ArgumentParser:

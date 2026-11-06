@@ -17,8 +17,9 @@ from __future__ import annotations
 import json
 import os
 import threading
-import time
 from pathlib import Path
+from core import timefmt
+from core.jsonio import read_json
 
 FLOOR, CEIL = 1.0, 3.0
 ALPHA = 0.35                      # EMA weight of the newest sample: converges in ~5 calls, ignores one outlier
@@ -32,11 +33,8 @@ def path_for(root: Path | str) -> Path:
 
 def load(root: Path | str) -> dict:
     """The stored calibration, or a neutral default. Never raises: a corrupt file must not stop a turn."""
-    try:
-        data = json.loads(path_for(root).read_text(encoding="utf-8"))
-        if not isinstance(data, dict):
-            raise ValueError
-    except (OSError, ValueError, json.JSONDecodeError):
+    data = read_json(path_for(root), None)
+    if not isinstance(data, dict):
         return {"factor": 1.0, "samples": 0, "updated": None, "models": {}}
     data.setdefault("factor", 1.0)
     data.setdefault("models", {})
@@ -69,7 +67,7 @@ def update(root: Path | str, est_raw: int, billed: int, model_key: str = "") -> 
         updated = sample if samples == 0 else (current * (1 - ALPHA) + sample * ALPHA)
         data["factor"] = round(max(FLOOR, min(CEIL, updated)), 4)
         data["samples"] = samples + 1
-        data["updated"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        data["updated"] = timefmt.stamp()
         data["last_est_raw"] = int(est_raw)
         data["last_billed"] = int(billed)
         models = data.setdefault("models", {})

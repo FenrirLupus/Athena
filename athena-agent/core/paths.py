@@ -34,6 +34,8 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from core.jsonio import read_json
+from core import durable
 
 # Three permission flags. Two are harmless and two are not — `list` is a read, so it rides the read flag.
 READ = "read"        # harmless: reading a file's contents
@@ -288,12 +290,9 @@ def _within(path: Path, root: Path) -> bool:
 def load_workspaces(profile_root: Path) -> list[str]:
     """Grants persist per profile, beside the config: `profiles/<name>/workspaces.json`."""
     path = Path(profile_root) / "workspaces.json"
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        entries = data.get("workspaces") if isinstance(data, dict) else data
-        return [str(e) for e in (entries or [])]
-    except (OSError, json.JSONDecodeError):
-        return []
+    data = read_json(path, [])
+    entries = data.get("workspaces") if isinstance(data, dict) else data
+    return [str(e) for e in (entries or [])]
 
 
 def save_workspaces(profile_root: Path, entries: list[str]) -> Path:
@@ -301,9 +300,7 @@ def save_workspaces(profile_root: Path, entries: list[str]) -> Path:
     entries = [str(Path(e).expanduser().resolve()) for e in entries if str(e).strip()]
     path = Path(profile_root) / "workspaces.json"
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps({"workspaces": entries}, indent=2), encoding="utf-8")
-    os.replace(tmp, path)
+    durable.write_state(path, json.dumps({"workspaces": entries}, indent=2))
     return path
 
 

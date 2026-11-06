@@ -33,6 +33,8 @@ from pathlib import Path
 
 from core import identity
 from core.approvals import ALLOW, DENY, ONCE, PERMANENT, SCOPES, SESSION, Decision
+from core.jsonio import read_json
+from core import durable
 
 STORE = "permissions.json"
 HISTORY_KEEP = 200
@@ -96,13 +98,6 @@ class PermissionManager:
         else:
             QUEUED.add(kind)
 
-    def kinds(self) -> list[dict]:
-        with self._lock:
-            rows = [{"kind": kind, "blocking": bool(spec["blocking"]), "executor": spec["run"] is not None}
-                    for kind, spec in sorted(self._executors.items())]
-            rows += [{"kind": kind, "blocking": bool(spec["blocking"]), "executor": True, "attached": True}
-                     for kind, spec in sorted(self._sources.items())]
-            return rows
 
     # -- attached sources --------------------------------------------------
     def attach(self, kind: str, lister, resolver, *, blocking: bool = False) -> None:
@@ -497,9 +492,8 @@ class PermissionManager:
 
     # -- persistence -------------------------------------------------------
     def _load(self) -> None:
-        try:
-            data = json.loads(self.store.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+        data = read_json(self.store, None)
+        if data is None:
             return
         if isinstance(data.get("permanent"), list):
             self._grants = [g for g in data["permanent"] if isinstance(g, dict)]
@@ -517,9 +511,7 @@ class PermissionManager:
                        "pending": [{"id": row["id"], "kind": row["kind"], "agent": row["agent"],
                                     "summary": row["summary"], "asked_at": row["asked_at"]}
                                    for row in self._asks.values() if row.get("blocking")]}
-            tmp = self.store.with_suffix(".tmp")
-            tmp.write_text(json.dumps(payload, indent=1), encoding="utf-8")
-            tmp.replace(self.store)
+            durable.write_state(self.store, json.dumps(payload, indent=1))
         except OSError:
             pass
 
@@ -538,9 +530,8 @@ def stamp_permission_rows(athena_root, profiles) -> dict:
     the test — "has a *uuid*" is. Without this, adoption silently orphans every approval given before it.
     """
     path = Path(athena_root) / "security" / STORE
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    data = read_json(path, None)
+    if data is None:
         return {"stamped": 0, "unresolved": 0}
     stamped = unresolved = 0
     for grant in data.get("permanent") or []:
@@ -558,9 +549,7 @@ def stamp_permission_rows(athena_root, profiles) -> dict:
         else:
             unresolved += 1
     if stamped:
-        tmp = path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(data, indent=1), encoding="utf-8")
-        tmp.replace(path)
+        durable.write_state(path, json.dumps(data, indent=1))
     return {"stamped": stamped, "unresolved": unresolved}
 
 

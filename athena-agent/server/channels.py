@@ -29,12 +29,14 @@ from core import identity
 from core import plugininstall
 from core import channelstate
 from core import metrics as metrics_mod
-from core import mentions
 from core import profile as profile_mod
 from server.instructions import DEFAULT_INSTRUCTIONS, HIVE_INSTRUCTIONS   # re-exported
 from server.admission import Admission
-from server.lifecycle import ChannelAsleep, ChannelLifecycle
+from server.lifecycle import ChannelAsleep, ChannelLifecycle   # re-exported: tests import it from here
 from server.routing import MentionRouter
+
+__all__ = ["Channel", "ChannelManager", "ChannelAsleep", "NO_TOOLS",
+           "DEFAULT_INSTRUCTIONS", "HIVE_INSTRUCTIONS"]
 from core.budget import IterationBudget
 from core.loop import run_turn
 from core.session import Session
@@ -76,12 +78,18 @@ class _NoTools:
 NO_TOOLS = _NoTools()
 
 
+_new_queue = queue.Queue      # aliased: a class-level name would otherwise shadow the queue module
+
+
 @dataclass
 class Channel:
     name: str
     root: Path
     session: Session
-    queue: queue.Queue = field(default_factory=queue.Queue)
+    # the factory is aliased because a class-level name shadows the module inside the class body
+    queue: queue.Queue = field(default_factory=_new_queue)        # [Message] turns
+    call_queue: queue.Queue = field(default_factory=_new_queue)   # [Voice] turns, drained first
+    work_ready: threading.Event = field(default_factory=threading.Event)
     thread: threading.Thread | None = None
     last_result: dict | None = None
     last_author: str = ""
@@ -95,6 +103,7 @@ class Channel:
     turns: int = 0
     agent_id: str = ""                             # the lane's minted id — what a metric or trace row carries
     busy: bool = False
+    stopping: bool = False                         # profile is gone: the worker exits after the turn in hand
     _done: threading.Event = field(default_factory=threading.Event)
     _lock: threading.Lock = field(default_factory=threading.Lock)
 
@@ -364,7 +373,10 @@ lane cannot fabricate a profile. Creation is `create()`."""
             )
             # a message from another agent is not the operator speaking — the prompt says who it is from
             author = job.get("author") or ""
-            user_text = f"[from @{author}] {job['text']}" if author else job["text"]
+            # both modes write into the same transcript; the marker is what tells them apart afterwards
+            marker = "[Voice]" if (job.get("mode") or "chat") == "call" else "[Message]"
+            spoken = f"{marker} {job['text']}"
+            user_text = f"[from @{author}] {spoken}" if author else spoken
             result = run_turn(
                 channel=channel.name,
                 channel_root=channel.root,
@@ -377,6 +389,7 @@ lane cannot fabricate a profile. Creation is `create()`."""
                 user_text=user_text,
                 cfg=turn_cfg,
                 budget=budget,
+                mode=job.get("mode") or "chat",
                 interrupts=lambda: self._drain(channel),
             )
             with channel._lock:
@@ -494,9 +507,9 @@ lane cannot fabricate a profile. Creation is `create()`."""
         """Queue a turn without waiting — see Admission.enqueue."""
         return self.admission.enqueue(name, text, author=author, hops=hops, reply_to=reply_to)
 
-    def submit(self, name: str, text: str, wait_s: float = 120.0) -> dict:
+    def submit(self, name: str, text: str, wait_s: float = 120.0, mode: str = "chat") -> dict:
         """Queue a turn and wait for this job — see Admission.submit."""
-        return self.admission.submit(name, text, wait_s=wait_s)
+        return self.admission.submit(name, text, wait_s=wait_s, mode=mode)
 
     def ensure_awake(self, channel: Channel) -> None:
         """Delivery wakes a sleeping channel — see ChannelLifecycle.ensure_awake."""

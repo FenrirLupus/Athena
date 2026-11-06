@@ -31,7 +31,6 @@ import subprocess
 import time
 from pathlib import Path
 
-from core import paths as paths_mod
 from tools.registry import Tool, ToolError
 
 # KDE's compositor does not speak wlr-screencopy, so grim fails there and spectacle (KWin's own API) is the way in.

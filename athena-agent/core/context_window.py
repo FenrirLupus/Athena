@@ -10,6 +10,7 @@ nothing, and a figure below 32,768 is refused rather than adopted.
 from __future__ import annotations
 
 import re
+from core import durable
 
 FLOOR = 32768
 
@@ -82,7 +83,6 @@ def adoption(model_cfg: dict, published: dict[str, int] | None) -> dict:
 
 def write_provider_window(config_path, value: int, model_name: str = "") -> bool:
     """Set `model.context_window_provider` in a config file, atomically. False when the key is not there to set."""
-    import os
     from pathlib import Path as _Path
 
     path = _Path(config_path)
@@ -97,13 +97,8 @@ def write_provider_window(config_path, value: int, model_name: str = "") -> bool
         if re.search(r"^\s*context_window_provider_model:", new, re.M):
             new = re.sub(r"^(\s*context_window_provider_model:)\s*.*$", rf'\g<1> "{model_name}"', new, count=1, flags=re.M)
         else:
-            new = re.sub(r"^(\s*context_window_provider:.*)$", rf'\g<1>\n\1'.replace("\\1", "\1"), new, count=1, flags=re.M)
+            new = re.sub(r"^(\s*context_window_provider:.*)$", r'\g<1>\n\1'.replace("\\1", "\1"), new, count=1, flags=re.M)
     if new == text:
         return True
-    tmp = path.with_suffix(".yaml.tmp")
-    with open(tmp, "w", encoding="utf-8") as handle:
-        handle.write(new)
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.replace(tmp, path)
+    durable.write_state(path, new)
     return True

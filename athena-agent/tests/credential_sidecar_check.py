@@ -19,7 +19,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import _boot  # noqa: F401 — puts the project root on sys.path
 
 from core import credproxy
 import providers.base as provider_base

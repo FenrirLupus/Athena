@@ -117,9 +117,6 @@ def history(page: int = 1, size: int = 128) -> dict:
     return {"page": page, "pages": pages, "size": size, "total": total, "groups": groups}
 
 
-def cursor() -> int:
-    with _lock:
-        return _seq
 
 
 class _Tee:
@@ -179,9 +176,6 @@ def _classify(text: str) -> str:
     return "info"
 
 
-def _stream_level() -> str:
-    import sys as _sys
-    return "error" if _sys.stderr is getattr(_sys, "__stderr__", None) else "info"
 
 
 def tap_streams() -> None:

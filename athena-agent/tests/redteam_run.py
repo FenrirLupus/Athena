@@ -16,7 +16,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import _boot  # noqa: F401 — puts the project root on sys.path
 
 from core import paths as paths_mod
 from core import plugins as plugins_mod

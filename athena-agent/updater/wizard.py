@@ -23,12 +23,12 @@ from __future__ import annotations
 import json
 import os
 import shutil
-import sys
 import time
 from pathlib import Path
 
 from . import apply as apply_mod
 from . import channels, source as source_mod
+from core.jsonio import read_json
 
 REPO_DEFAULT = "FenrirLupus/Athena"
 
@@ -105,7 +105,7 @@ def run(*, athena_root: Path, channel: str = "", source_spec: str = "", branch: 
     _say(f"    {installed} · {installed_channel}   ({live})")
     if target_channel != installed_channel:
         _say(f"    channel switch: {installed_channel} → {target_channel} (branch {target_branch})")
-    _say(f"    branches: main=stable · beta=beta · alpha=alpha")
+    _say("    branches: main=stable · beta=beta · alpha=alpha")
 
     if check_only and src.kind != "path":
         return {"checked": True, "installed": installed, "channel": installed_channel,
@@ -196,10 +196,7 @@ def status(*, athena_root: Path) -> dict:
     history = athena_root / "updater" / "history.jsonl"
     state = {}
     if state_file.is_file():
-        try:
-            state = json.loads(state_file.read_text(encoding="utf-8"))
-        except ValueError:
-            state = {}
+        state = read_json(state_file, {})
     last: dict = {}
     if history.is_file():
         try:

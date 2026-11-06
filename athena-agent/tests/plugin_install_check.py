@@ -10,7 +10,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import _boot  # noqa: F401 — puts the project root on sys.path
 
 from core import plugininstall
 
@@ -136,6 +136,14 @@ with tempfile.TemporaryDirectory() as td:
     # -- the config edit kept the file parseable -------------------------
     text = (athena / "config.yaml").read_text(encoding="utf-8")
     checks["config_still_has_its_comments"] = "a name on this list is" in text
+
+    # --- a root with no install log lists nothing ---------------------------
+    # the log is absent on a first run, which is the normal state of a new box; reading it as a list rather than a
+    # dict raised AttributeError on .items() and made `plugins installed` fail instead of saying "nothing installed"
+    empty_root = Path(td) / "fresh"
+    empty_root.mkdir()
+    checks["fresh_root_lists_nothing"] = plugininstall.installed(empty_root / "plugins", empty_root) == []
+
 
 for name, passed in checks.items():
     print(f"  {'PASS' if passed else 'FAIL'}  {name}")

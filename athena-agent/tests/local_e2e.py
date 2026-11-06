@@ -1,7 +1,7 @@
 """End-to-end: Qwen3.5-4B from Hugging Face, tiered across GPU/CPU/disk, answering through the loop."""
 import sys, json, tempfile, copy, time
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import _boot  # noqa: F401 — puts the project root on sys.path
 
 from config import loader
 from providers import base as pbase
