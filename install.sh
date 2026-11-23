@@ -16,26 +16,28 @@
 # directory and re-runs itself there. That is what makes the download-and-run form work —
 #   curl -fsSL https://raw.githubusercontent.com/FenrirLupus/Athena/alpha-0.0.4/install.sh -o /tmp/athena-install.sh
 #   bash /tmp/athena-install.sh --list
-# A pipe (`curl … | bash`) is refused on purpose: the installer asks a question, and a script cannot read an answer
-# from its own source.
+# It is also a one-shot: piped, it fetches the branch, reattaches your terminal for its one question, and installs —
+#   curl -fsSL https://raw.githubusercontent.com/FenrirLupus/Athena/alpha-0.0.4/install.sh | bash
+#   curl -fsSL …/install.sh | bash -s -- --yes          # unattended, no question asked
+#   curl -fsSL …/install.sh | bash -s -- --list         # what would it do here?
 #
 # Exit codes: 0 done · 1 refused (unsupported platform or missing prerequisite) · 2 usage.
 set -euo pipefail
 
 ORIG_ARGS=("$@")
 
-# Where this file actually is. A piped script has no path to itself, and cannot ask a question or find its own
-# platform folders — say so plainly instead of failing later as a mysterious "cancelled".
+# Where this file actually is. A piped script has no path to itself — it runs under a name like /dev/stdin or a bare
+# `bash` — so there is nothing beside it to detect. That is the one-shot form: fetch the branch and continue there,
+# and if a terminal is available, hand it back so the installer can ask its question. Without a terminal it cannot
+# ask anything, so say that rather than hang or silently cancel.
 SRC="${BASH_SOURCE[0]:-}"
+PIPED=0
 if [ -z "$SRC" ] || [ ! -f "$SRC" ]; then
-  cat >&2 <<'PIPED'
-athena: this script is being piped. Save it, then run it:
-  curl -fsSL https://raw.githubusercontent.com/FenrirLupus/Athena/alpha-0.0.4/install.sh -o /tmp/athena-install.sh
-  bash /tmp/athena-install.sh --list
-PIPED
-  exit 2
+  PIPED=1
+  HERE=""
+else
+  HERE="$(cd "$(dirname "$SRC")" && pwd)"
 fi
-HERE="$(cd "$(dirname "$SRC")" && pwd)"
 PREFIX="${HOME}/.athena"
 PROGRAM="athena-agent"
 REPO_URL="${ATHENA_URL:-https://github.com/FenrirLupus/Athena.git}"
@@ -43,12 +45,14 @@ REF="${ATHENA_REF:-alpha-0.0.4}"
 PLATFORM=""
 MODE=""
 DRY=0
+YES=0
 PASS_THROUGH=()
 
 usage() { sed -n '2,15p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
 platforms() {                   # every root folder that carries an install.sh, minus the program
+  [ -n "${HERE}" ] || return 0
   for dir in "${HERE}"/*/; do
     [ -d "$dir" ] || continue
     name="$(basename "$dir")"
@@ -94,11 +98,26 @@ while [ $# -gt 0 ]; do
     --prefix) PREFIX="${2:-}"; [ -n "$PREFIX" ] || usage; shift 2 ;;
     --ref) REF="${2:-}"; [ -n "$REF" ] || usage; shift 2 ;;
     --dry-run) DRY=1; shift ;;
-    --yes|-y) PASS_THROUGH+=("--yes"); shift ;;
+    --yes|-y) YES=1; PASS_THROUGH+=("--yes"); shift ;;
     -h|--help) usage ;;
     *) PASS_THROUGH+=("$1"); shift ;;
   esac
 done
+
+# A piped run exists to install — nothing else about it makes sense, since it has no folders to explore.
+if [ "$PIPED" = 1 ] && [ -z "$MODE" ]; then MODE="install"; fi
+
+# ... and installing means asking one question, so give it a terminal. A pipe is not a terminal; /dev/tty is, when
+# one is attached. With neither, the install can only proceed unattended, which is what --yes says.
+if [ "$PIPED" = 1 ] && [ "$MODE" = "install" ] && [ "$YES" != 1 ] && [ "$DRY" != 1 ]; then
+  if [ -r /dev/tty ] && ( : </dev/tty ) 2>/dev/null; then
+    exec </dev/tty
+  else
+    printf 'athena: no terminal to ask on. Re-run with --yes to install unattended:\n' >&2
+    printf '  curl -fsSL https://raw.githubusercontent.com/FenrirLupus/Athena/alpha-0.0.4/install.sh | bash -s -- --yes\n' >&2
+    exit 1
+  fi
+fi
 
 # -- bootstrap: this file run on its own ---------------------------------------
 # A copied install.sh has no platform folders beside it. Fetch the branch and continue there, so the download-and-run
