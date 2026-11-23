@@ -53,9 +53,13 @@ agent's own profiles, keys, transcripts and vault are never touched by an instal
 ```bash
 cd ~/.athena/athena-agent
 ./athena.sh box serve      # http://127.0.0.1:8765
-./athena.sh lane           # can this lane start? config · model · key · window
-./athena.sh selftest       # the offline check, mock provider, no credit
+./athena.sh box lane       # can this lane start? config · model · key · window
+./athena.sh box selftest   # the offline check, mock provider, no credit
 ```
+
+Run her **through the box** (`box`). The virtual environment is built with the box's Python, so its interpreter
+belongs to the box — invoking it from the host picks the host's `python3`, which is a different version and has none
+of the requirements. `./athena.sh box <command>` is the supported form on a Distrobox install.
 
 ## Requirements
 

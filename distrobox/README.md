@@ -40,7 +40,8 @@ not: pass `--image` to choose another.
 4. copies the program to `~/.athena/athena-agent`, preserving `profiles/`, `.secret`, `metrics/` and `sessions/`;
 5. creates the venv once and reapplies `requirements.txt`;
 6. proves it with `./athena.sh selftest` — the mock provider, offline, no credit;
-7. prints the three commands that start her.
+7. prints the three commands that start her, each through `box` — the venv belongs to the box's Python, so the
+   agent is run from inside the box, never from the host's interpreter.
 
 Every step prints what it runs. `--dry-run` prints them and writes nothing.
 
