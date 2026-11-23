@@ -36,6 +36,9 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+# --prefix is only known after parsing: everything derived from it is recomputed here, once.
+TARGET="${PREFIX}/athena-agent"
+
 say() { printf 'athena-install: %s\n' "$*"; }
 die() { printf 'athena-install: %s\n' "$*" >&2; exit 1; }
 

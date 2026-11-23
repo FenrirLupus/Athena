@@ -46,6 +46,7 @@ PLATFORM=""
 MODE=""
 DRY=0
 YES=0
+PREFIX_GIVEN=0
 PASS_THROUGH=()
 
 usage() { sed -n '2,15p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
@@ -95,7 +96,7 @@ while [ $# -gt 0 ]; do
     --list) MODE="list"; shift ;;
     --install) MODE="install"; shift ;;
     --platform) PLATFORM="${2:-}"; [ -n "$PLATFORM" ] || usage; shift 2 ;;
-    --prefix) PREFIX="${2:-}"; [ -n "$PREFIX" ] || usage; shift 2 ;;
+    --prefix) PREFIX="${2:-}"; [ -n "$PREFIX" ] || usage; PREFIX_GIVEN=1; shift 2 ;;
     --ref) REF="${2:-}"; [ -n "$REF" ] || usage; shift 2 ;;
     --dry-run) DRY=1; shift ;;
     --yes|-y) YES=1; PASS_THROUGH+=("--yes"); shift ;;
@@ -155,7 +156,8 @@ SCRIPT="${HERE}/${PLATFORM}/install.sh"
 STATE="$(platform_state "$PLATFORM")"
 [ "$STATE" = "available" ] || { echo "athena: ${PLATFORM} is not installable here — ${STATE}." >&2; exit 1; }
 
-ARGS=(--prefix "$PREFIX")
+ARGS=()
+[ "$PREFIX_GIVEN" = 1 ] || ARGS+=(--prefix "$PREFIX")
 [ "$DRY" = 1 ] && ARGS+=(--dry-run)
 [ ${#PASS_THROUGH[@]} -gt 0 ] && ARGS+=("${PASS_THROUGH[@]}")
 
