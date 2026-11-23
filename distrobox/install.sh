@@ -72,6 +72,9 @@ fi
 # The box's package manager decides the names; both families are covered because the image is the operator's choice.
 IN_BOX='
   set -e
+  # The box'"'"'s own interpreter, never whatever PATH happens to resolve: $HOME is shared with the host, so a host
+  # venv or a conda base on PATH would otherwise be used to build the agent'"'"'s environment.
+  PY=/usr/bin/python3; [ -x "$PY" ] || PY=python3
   if command -v apt-get >/dev/null 2>&1; then
     export DEBIAN_FRONTEND=noninteractive
     sudo apt-get update -qq && sudo apt-get install -y -qq python3 python3-venv python3-pip git rsync sqlite3 >/dev/null
@@ -84,7 +87,7 @@ IN_BOX='
   else
     echo "athena-install: no supported package manager in the box" >&2; exit 1
   fi
-  python3 -c "import sqlite3; sqlite3.connect(\":memory:\").execute(\"create virtual table t using fts5(x)\")" \
+  "$PY" -c "import sqlite3; sqlite3.connect(\":memory:\").execute(\"create virtual table t using fts5(x)\")" \
     || { echo "athena-install: this Python has no FTS5 — the vault and the recall index require it" >&2; exit 1; }
 '
 say "deps      python3 · pip · venv · git · rsync · sqlite3 (with FTS5), inside the box"
@@ -104,7 +107,7 @@ run rsync -a --delete \
 # -- 4 · the venv -------------------------------------------------------------
 # The venv lives BESIDE the code, at ${PREFIX}/.venv — athena.sh looks for it there, and keeping it outside the code
 # tree means a reinstall (which rsyncs with --delete) can never wipe the environment it is running from.
-VENV_STEP='cd "$1" && if [ ! -x "$2/bin/python3" ]; then python3 -m venv "$2"; fi && "$2/bin/pip" install -q -r requirements.txt'
+VENV_STEP='cd "$1" && if [ ! -x "$2/bin/python3" ]; then PY=/usr/bin/python3; [ -x "$PY" ] || PY=python3; "$PY" -m venv "$2"; fi && "$2/bin/pip" install -q -r requirements.txt'
 say "venv      ${PREFIX}/.venv (created once; requirements reapplied)"
 run distrobox enter "$NAME" -- bash --norc -c "$VENV_STEP" _ "$TARGET" "${PREFIX}/.venv"
 
