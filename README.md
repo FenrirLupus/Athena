@@ -69,6 +69,4 @@ Linux with a Python 3.11+ virtual environment, SQLite **with FTS5** (the vault a
 ## What is deliberately not in this repository
 
 The design record — the architecture documents, the proposals and their reviews — is maintained outside this tree
-and is not published. Code comments that cite a `documentation/…` path refer to that record, not to a file here. One
-tracing note does ship, at `athena-agent/documentation/optimization/`, because it documents measurements the code
-makes rather than decisions about it.
+and is not published. Code comments that cite a `documentation/…` path refer to that record, not to a file here.
