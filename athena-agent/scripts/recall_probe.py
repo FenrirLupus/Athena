@@ -90,7 +90,6 @@ def main(argv=None) -> int:
             print(f"  reason: {mapping.reason} (line {mapping.line})")
         return 0
     if args.pairs:
-        import json
         from core import recall as recall_mod
         from core import synonyms as synonyms_mod
         fixtures = json.loads((Path(TREE) / "tests" / "fixtures" / "recall_pairs.json").read_text(encoding="utf-8"))
