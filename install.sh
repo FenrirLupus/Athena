@@ -156,8 +156,9 @@ SCRIPT="${HERE}/${PLATFORM}/install.sh"
 STATE="$(platform_state "$PLATFORM")"
 [ "$STATE" = "available" ] || { echo "athena: ${PLATFORM} is not installable here — ${STATE}." >&2; exit 1; }
 
-ARGS=()
-[ "$PREFIX_GIVEN" = 1 ] || ARGS+=(--prefix "$PREFIX")
+# Always pass it: the platform installer's own default is $HOME/.athena, so omitting the flag would silently ignore
+# an override that only the dispatcher was told about.
+ARGS=(--prefix "$PREFIX")
 [ "$DRY" = 1 ] && ARGS+=(--dry-run)
 [ ${#PASS_THROUGH[@]} -gt 0 ] && ARGS+=("${PASS_THROUGH[@]}")
 
