@@ -1,0 +1,316 @@
+"""Config loading — defaults, user overrides, validation.
+
+Rules (documentation/architecture/08-config.md):
+  * defaults ship commented and are the documentation
+  * a user value overrides a default key by key; a missing key falls back
+  * every value is validated at load; an invalid file is refused with the key and the reason
+  * unknown keys warn rather than crash
+"""
+from __future__ import annotations
+
+from pathlib import Path
+
+import yaml
+from core.root import athena_root
+from core import trace
+
+ATHENA_ROOT = athena_root()
+AGENT_DIR = ATHENA_ROOT / "athena-agent"
+DEFAULT_CONFIG = AGENT_DIR / "config" / "defaults.yaml"
+USER_CONFIG = ATHENA_ROOT / "config.yaml"
+
+
+class ConfigError(RuntimeError):
+    """Raised when the config is present but invalid; carries the offending key."""
+
+
+def _refuse(rule: str, message: str) -> None:
+    """Trace the refusal before raising: the file, the rule and the key, in one line."""
+    trace.failure("config.refused", None, rule=rule, error=f"ConfigError: {message}")
+    raise ConfigError(message)
+
+
+def _load_yaml(path: Path) -> dict:
+    if not path.exists():
+        trace.event("config.absent", level="debug", file=path.name)
+        return {}
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except yaml.YAMLError as exc:
+        # the parser's own message quotes the offending line, which is file content: record the class only
+        trace.failure("config.parse.failed", None, file=path.name, rule="invalid-yaml",
+                      error=type(exc).__name__)
+        raise ConfigError(f"{path.name}: invalid YAML: {exc}") from exc
+    if not isinstance(data, dict):
+        _refuse("not-a-mapping", f"{path.name}: top level must be a mapping")
+    return data
+
+
+def _merge(base: dict, override: dict, path: str = "") -> dict:
+    """Deep-merge override onto base, returning a NEW dict (never aliasing base)."""
+    out = {}
+    for key, val in base.items():
+        if isinstance(val, dict):
+            out[key] = _merge(val, override.get(key, {}) if isinstance(override.get(key), dict) else {}, f"{path}{key}.")
+        else:
+            out[key] = override.get(key, val)
+    for key, val in override.items():
+        if key not in base:
+            out[key] = val
+    return out
+
+
+def _unknown_keys(base: dict, user: dict, warnings: list[str], path: str = "") -> None:
+    for key, val in user.items():
+        if key not in base:
+            warnings.append(f"unknown config key: {path}{key}")
+        elif isinstance(val, dict) and isinstance(base.get(key), dict):
+            _unknown_keys(base[key], val, warnings, f"{path}{key}.")
+
+
+def _leaves(data: dict, prefix: str = "") -> list[str]:
+    """Dotted path of every setting a file can set — the unit `config.source` is reported in."""
+    out: list[str] = []
+    for key, val in (data or {}).items():
+        name = f"{prefix}{key}"
+        if isinstance(val, dict):
+            out.extend(_leaves(val, f"{name}."))
+        else:
+            out.append(name)
+    return out
+
+
+def _diff_paths(base: dict, user: dict, prefix: str = "") -> list[str]:
+    """Settings where the user file actually changes the default. A key present but equal is not a decision."""
+    out: list[str] = []
+    for key, val in (user or {}).items():
+        name = f"{prefix}{key}"
+        if isinstance(val, dict) and isinstance((base or {}).get(key), dict):
+            out.extend(_diff_paths(base[key], val, f"{name}."))
+        elif val != (base or {}).get(key):
+            out.append(name)
+    return out
+
+
+PROVIDER_FORMATS = {"openai", "anthropic", "mock", "deepseek", "lmstudio", "llamacpp",
+                    "ollama", "vllm", "custom", "claude"}
+LOCAL_BACKENDS = {"transformers", "vllm", "llamacpp", "command"}
+
+
+def _validate(cfg: dict) -> None:
+    model = cfg.get("model") or {}
+    fmt = (model.get("provider") or "mock").lower()
+    if fmt not in PROVIDER_FORMATS:
+        _refuse("provider-format",
+                f"model.provider: {fmt!r} is not a wire format — use openai, anthropic or mock")
+
+    local = model.get("local") or {}
+    if local.get("enabled"):
+        backend = (local.get("backend") or "llamacpp").lower()
+        if backend not in LOCAL_BACKENDS:
+            _refuse("local-backend",
+                    f"model.local.backend: {backend!r} — use transformers, vllm, llamacpp or command")
+        if backend == "command" and not str(local.get("command") or "").strip():
+            _refuse("local-command-missing", "model.local.command: required when backend is command")
+        if backend in ("llamacpp", "vllm", "transformers") and not str(local.get("name") or local.get("repo") or "").strip():
+            _refuse("local-name-missing",
+                    "model.local.name: required — name a downloaded model (athena models list) or set local.repo")
+        if int(local.get("port") or 0) <= 0:
+            _refuse("local-port", "model.local.port: must be a positive port number")
+        # a local server truncates the prompt past its own ctx, so ctx must cover the window the stack
+        # is sized against — comparing to model.window (not a literal) keeps this true at 64K and 128K
+        ctx = int(local.get("ctx") or 0)
+        window = int(model.get("window") or 0)
+        try:
+            from core.context_window import resolve as _resolve_window
+            window = int(_resolve_window(model).get("window") or window)
+        except Exception:                          # noqa: BLE001 — a broken window block is reported elsewhere
+            pass
+
+        if ctx and ctx < window:
+            _refuse("ctx-below-window",
+                    f"model.local.ctx: {ctx} is below model.window ({window}) — the server would silently "
+                    f"truncate the front of the prompt, which looks exactly like the agent forgetting")
+    window = int(model.get("window") or 0)
+    if window < 32768:
+        _refuse("window-below-floor",
+                f"model.window: {window} is below the 32,768 minimum — the prompt stack cannot hold a conversation")
+    local_floor = model.get("context_window_local")
+    if local_floor not in (None, "", 0):
+        floor = int(local_floor)
+        if floor < 32768:
+            _refuse("floor-below-minimum",
+                    f"model.context_window_local: {floor} is below the 32,768 minimum — it is the value the effective "
+                    f"window falls back to, so a smaller floor silently shrinks the prompt stack")
+    out_tok = int(model.get("max_output_tokens") or 0)
+    if out_tok <= 0 or out_tok >= window:
+        _refuse("max-output-tokens",
+                f"model.max_output_tokens: {out_tok} must be > 0 and below the window ({window})")
+
+    budget = cfg.get("budget") or {}
+    pcts = {k: float(budget.get(k, 0.0)) for k in
+            ("system_pct", "assistant_pct", "user_pct", "summary_pct", "history_pct",
+             "memory_pct", "output_pct")}
+    for key, val in pcts.items():
+        if val < 0 or val > 100:
+            _refuse("budget-share-range", f"budget.{key}: {val} is out of range 0-100")
+    total = sum(pcts.values())
+    if total > 100.0:
+        _refuse("budget-shares-exceed-window",
+                f"budget: block shares plus output_pct ({total:.1f}%) exceed the window — lower a share or raise model.window")
+    if pcts["summary_pct"] > pcts["history_pct"]:
+        _refuse("summary-exceeds-history",
+                f"budget.summary_pct ({pcts['summary_pct']}) must not exceed budget.history_pct "
+                f"({pcts['history_pct']}) — the digest would cost more than the history it replaces")
+
+    # The anchor's share is carved OUT of system_pct, so it must fit inside it — and it must not be counted
+    # in `total`: at the shipped defaults the seven shares already sum to 100, so counting it would refuse
+    # every boot.
+    temporal_pct = float(budget.get("temporal_pct", 0.0) or 0.0)
+    if temporal_pct < 0 or temporal_pct > pcts["system_pct"]:
+        _refuse("budget-temporal-range",
+                f"budget.temporal_pct: {temporal_pct} must be within 0-{pcts['system_pct']} — the anchor is "
+                f"carved out of the system share, so a larger figure would leave the instructions with nothing")
+    temporal_cfg = cfg.get("temporal") or {}
+    seam_minutes = float(temporal_cfg.get("seam_after_minutes", 60) or 0)
+    under_seconds = float(temporal_cfg.get("continuous_under_seconds", 60) or 0)
+    if seam_minutes > 0 and under_seconds > seam_minutes * 60:
+        _refuse("temporal-band-order",
+                f"temporal.continuous_under_seconds ({under_seconds:g}) must not exceed "
+                f"temporal.seam_after_minutes x 60 ({seam_minutes * 60:g}) — a gap cannot read as "
+                f"continuous and also mark a break")
+
+    for key in ("max_iterations",):
+        if int(budget.get(key, 0)) <= 0:
+            _refuse("max-iterations", f"budget.{key}: must be positive")
+
+    recall = cfg.get("recall") or {}
+    score = float(recall.get("min_score", 0.0) or 0.0)
+    semantic = float(recall.get("min_semantic", 0.0) or 0.0)
+    jaccard = float(recall.get("min_jaccard", 0.0) or 0.0)
+    if not 0.0 < score <= 1.0:
+        _refuse("recall-min-score", f"recall.min_score: {score} must be within 0-1, exclusive of 0")
+    if not 0.0 < semantic <= 1.0:
+        _refuse("recall-min-semantic", f"recall.min_semantic: {semantic} must be within 0-1, exclusive of 0")
+    if not isinstance(recall.get("synonyms", ""), str):
+        _refuse("recall-synonyms-type", "recall.synonyms: must be a path string")
+    if not 0.0 <= jaccard <= 1.0:
+        _refuse("recall-min-jaccard", f"recall.min_jaccard: {jaccard} must be within 0-1")
+    if jaccard > score:
+        _refuse("recall-jaccard-above-score",
+                f"recall.min_jaccard ({jaccard}) must not exceed recall.min_score ({score}) — a match could "
+                f"clear the overlap bar and still be refused by coverage, which reads as a broken threshold")
+    for key, low in (("min_tokens", 1), ("min_history_rows", 0), ("max_age_days", 1),
+                     ("quote_chars", 40), ("candidates", 1), ("max_consecutive", 0),
+                     ("index_max_rows", 100)):
+        value = recall.get(key)
+        if value is None:
+            continue
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            _refuse(f"recall-{key}-type", f"recall.{key}: {value!r} is not an integer")
+            continue
+        if number < low:
+            _refuse(f"recall-{key}-range", f"recall.{key}: {number} must be at least {low}")
+
+
+SECRET_KEYS = frozenset({"api_key", "apikey", "token", "secret", "password", "passwd", "private_key",
+                         "passphrase", "api_token", "auth_token", "access_token", "refresh_token"})
+
+
+def redact(value):
+    """A config rendered for a human or a page: secret-shaped keys removed at every depth.
+
+    A key is secret by NAME, not by containing a word — matching anything that merely contains "token" also hides
+    `model.max_output_tokens`, a setting an operator needs to see.
+    """
+    def is_secret(name: str) -> bool:
+        key = str(name).lower()
+        return key in SECRET_KEYS or key.endswith(("_token", "_secret", "_password", "_api_key", "_passphrase"))
+
+    if isinstance(value, dict):
+        return {k: redact(v) for k, v in value.items() if not (isinstance(k, str) and is_secret(k))}
+    if isinstance(value, list):
+        return [redact(v) for v in value]
+    return value
+
+
+def render_full(effective: dict, template: Path | None = None) -> str:
+    """A commented config file with **every** setting populated from `effective`.
+
+    The file is the whole surface: every key an operator can see, change or break is present with the value
+    currently in force, whether the file is being created or refreshed after an update. A file that lists only
+    overrides hides the rest of the settings from the person expected to tune them.
+    """
+    from core.agentconfig import _fill          # the same comment-preserving filler the agent files use
+
+    template = template or (Path(__file__).resolve().parent / "defaults.yaml")
+    return _fill(template.read_text(encoding="utf-8"), effective)
+
+
+def write_full(effective: dict, path: Path | None = None) -> Path:
+    """Write the effective config to `path` (default: the user's config.yaml), fully populated.
+
+    Guarded and atomic: the text is parsed before it lands (`core/configguard.py`), so a renderer bug that would
+    emit unreadable YAML is a refusal with a line number rather than a config the next boot cannot load — and the
+    previous file survives, because a write that cannot be read back is not a write.
+    """
+    from core import configguard
+    from core import durable
+
+    root = athena_root()
+    target = path or (root / "config.yaml")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    text = render_full(effective)
+    preimage = None
+    try:
+        preimage = target.read_text(encoding="utf-8")
+    except OSError:
+        preimage = None
+    configguard.guard(text, target, preimage=preimage)
+    durable.write_state(target, text)
+    return target
+
+
+def load_file(path) -> dict:
+    """Parse one config file with the same rules as the effective config; empty when it cannot be read."""
+    return _load_yaml(Path(path)) or {}
+
+
+def load() -> dict:
+    """Defaults <- user config, validated. Returns the effective config."""
+    base = _load_yaml(DEFAULT_CONFIG)
+    if not base:
+        _refuse("defaults-missing", f"missing defaults at {DEFAULT_CONFIG}")
+    user = _load_yaml(USER_CONFIG)
+    warnings: list[str] = []
+    _unknown_keys(base, user, warnings)
+    cfg = _merge(base, user)
+    _validate(cfg)
+    overridden = _diff_paths(base, user)
+    for key in overridden[:20]:
+        trace.event("config.source", level="debug", key=key, source=USER_CONFIG.name)
+    if len(overridden) > 20:
+        trace.event("config.source", level="debug", source=USER_CONFIG.name, more=len(overridden) - 20)
+    trace.event("config.load", level="info", defaults=DEFAULT_CONFIG.name, user=USER_CONFIG.name,
+                keys=len(_leaves(cfg)), overrides=len(overridden), warnings=len(warnings))
+    cfg["_warnings"] = warnings
+    cfg["_athena_root"] = str(ATHENA_ROOT)
+    return cfg
+
+
+def paths(cfg: dict) -> dict:
+    """Resolved filesystem locations used across the system."""
+    root = ATHENA_ROOT
+    agents = root / str((cfg.get("agents") or {}).get("dir") or "profiles")
+    # `dir` is operator input and an absolute value replaces `root` outright, so the lane directory can
+    # land anywhere; a `..` component does the same without looking like an absolute path
+    if agents.resolve() != root.resolve() and root.resolve() not in agents.resolve().parents:
+        trace.event("config.outside", level="error", rule="agents-dir-outside-root",
+                    dir=str(agents), root=str(root))
+    return {
+        "root": root,
+        "agents": agents,
+        "sessions_rel": "sessions",
+    }

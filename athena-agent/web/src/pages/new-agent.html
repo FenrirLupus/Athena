@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<!--
+  html/new-agent.html — the setup wizard: persona → provider → credentials → model.
+
+  Reached from Settings rather than the global navbar: it is a task, not a place. The page navbar is the
+  step list (each step a button), the page body is one fieldset per step with only the current one shown,
+  and the page footer is the Back / Next / Create control.
+
+  No secret is ever displayed back. The key is typed once, posted once, and stored in ~/.athena/.secret
+  by the server; this page keeps it only in the input element until the form is submitted.
+-->
+<html lang="en">
+<head>
+  <script src="../js/theme.js"></script>
+  <script src="../js/dom.js"></script>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>New agent · Athena</title>
+  <link rel="stylesheet" href="../css/palette.css">
+  <link rel="stylesheet" href="../css/global.css">
+  <link rel="stylesheet" href="../css/page.css">
+</head>
+<body data-page="new-agent" data-root="../">
+
+  <!-- 1 · GLOBAL HEADER — information only -->
+{{header}}    <nav class="global-nav" aria-label="Main navigation">
+    <div class="nav-links">
+          <a class="nav-link" href="../index.html" data-page="home">Home</a>
+          <a class="nav-link" href="chat.html" data-page="chat">Chat</a>
+          <a class="nav-link" href="call.html" data-page="call">Call</a>
+          <a class="nav-link" href="agents.html" data-page="agents">Agents</a>
+          <a class="nav-link active" href="settings.html" data-page="settings">Settings</a>
+        </div>
+    <div class="nav-tools">
+      <button class="nav-icon" id="bell" type="button" aria-label="Notifications" aria-haspopup="dialog" aria-expanded="false">
+        <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true" focusable="false">
+          <path d="M8 1.6a3.6 3.6 0 0 0-3.6 3.6v2.5L3 10.2h10L11.6 7.7V5.2A3.6 3.6 0 0 0 8 1.6z" fill="currentColor"/>
+          <path d="M6.6 11.4a1.5 1.5 0 0 0 2.8 0z" fill="currentColor"/>
+        </svg>
+      </button>
+      <div class="notif-panel" id="notif-panel" hidden role="dialog" aria-label="notifications">
+        <div class="notif-head">
+          <span>Notifications</span>
+          <span class="notif-actions">
+            <button class="notif-action" id="notif-read-all" type="button">Mark as Read</button>
+            <button class="notif-action" id="notif-clear-all" type="button">Clear All</button>
+            <button class="notif-clear" id="notif-close" type="button" aria-label="close">×</button>
+          </span>
+        </div>
+        <ul class="notif-list" id="notif-list"><li class="notif-empty muted small">nothing yet</li></ul>
+      </div>
+      <button class="nav-avatar" id="avatar" type="button" aria-label="Account">DJ</button>
+    </div>
+  </nav>
+
+  <!-- 2 · GLOBAL NAVBAR — pages only -->
+
+  <!-- 3 · GLOBAL BODY -->
+  <main id="global-body" data-layer="3">
+    <div id="page-root">
+
+      <!-- 5 · PAGE HEADER — 6 · PAGE NAVBAR is the step list -->
+      <header id="page-header" data-layer="5">
+        <div class="page-heading">
+          <h1 id="wizard-title">Set up an agent</h1>
+          <p class="page-subtitle">
+            Four steps: who it is, where it answers from, the key it uses, and which model.
+          </p>
+        </div>
+      </header>
+
+      <!-- 7 · PAGE BODY — one fieldset per step -->
+      <section id="page-body" data-layer="7">
+        <form class="wizard" id="wizard" novalidate>
+
+          <fieldset class="step active" data-step="1">
+            <legend>Who is this agent?</legend>
+            <p class="step-note">The name is its address: lowercase, no spaces.</p>
+
+            <label class="field">
+              <span class="field-label">Agent name</span>
+              <input id="f-channel" type="text" placeholder="scout" maxlength="32" autocomplete="off" required>
+              <span class="field-hint">becomes <code>profiles/&lt;name&gt;/</code> — letters, digits, - and _</span>
+            </label>
+
+            <label class="field">
+              <span class="field-label">Display name</span>
+              <input id="f-name" type="text" placeholder="Scout" maxlength="80">
+              <span class="field-hint">how it introduces itself in the conversation</span>
+            </label>
+
+            <label class="field">
+              <span class="field-label">What it is for</span>
+              <textarea id="f-role" rows="2" placeholder="a research assistant that reads before it answers"></textarea>
+            </label>
+
+            <label class="field">
+              <span class="field-label">How it speaks</span>
+              <textarea id="f-tone" rows="2" placeholder="terse, cites what it read, no preamble"></textarea>
+            </label>
+
+            <label class="field">
+              <span class="field-label">What it must never do</span>
+              <textarea id="f-boundaries" rows="2" placeholder="guess a fact it has not checked"></textarea>
+            </label>
+          </fieldset>
+
+          <fieldset class="step" data-step="2">
+            <legend>Where does it answer from?</legend>
+            <p class="step-note">A remote endpoint speaks one of two wire formats; a local model is served from <code>~/.athena/models</code>.</p>
+
+            <label class="field">
+              <span class="field-label">Provider</span>
+              <select id="f-provider">
+                <option value="openai">openai — OpenAI, DeepSeek, OpenRouter, vLLM, LM Studio</option>
+                <option value="anthropic">anthropic — Messages API</option>
+                <option value="local">local — a model downloaded into models/</option>
+              </select>
+            </label>
+
+            <label class="field" data-for="remote">
+              <span class="field-label">Base URL</span>
+              <input id="f-base-url" type="url" placeholder="https://api.deepseek.com/v1">
+              <span class="field-hint">with or without <code>/v1</code> — both are accepted</span>
+            </label>
+
+            <label class="field" data-for="local">
+              <span class="field-label">Downloaded model</span>
+              <select id="f-local"><option value="">— none downloaded —</option></select>
+              <span class="field-hint">add one with <code>athena.sh models download &lt;repo&gt;</code></span>
+            </label>
+          </fieldset>
+
+          <fieldset class="step" data-step="3">
+            <legend>Credentials</legend>
+            <p class="step-note">
+              The key is written to <code>~/.athena/.secret</code> as <code>agent-&lt;name&gt;=…</code> and
+              never into the profile — a profile gets copied and archived; a secret file does not.
+            </p>
+
+            <label class="field" data-for="credentials">
+              <span class="field-label">API key</span>
+              <input id="f-api-key" type="password" autocomplete="off" spellcheck="false"
+                     placeholder="sk-…">
+              <span class="field-hint">leave empty to reuse a key already saved for this agent</span>
+            </label>
+
+            <p class="field-note" data-for="local-key">
+              A local model needs no key — it is served on this machine.
+            </p>
+          </fieldset>
+
+          <fieldset class="step" data-step="4">
+            <legend>Which model?</legend>
+            <p class="step-note">The window is what the whole prompt stack is sized against.</p>
+
+            <label class="field">
+              <span class="field-label">Model name</span>
+              <input id="f-model" type="text" placeholder="deepseek-chat">
+              <span class="field-hint" data-for="local">taken from the selected folder for a local model</span>
+            </label>
+
+            <div class="field-row">
+              <label class="field">
+                <span class="field-label">Context floor (tokens)</span>
+                <input id="f-window" type="number" min="32768" step="1024" value="32768">
+                <span class="field-hint muted small">The minimum this agent falls back to; a window the provider publishes takes priority.</span>
+              </label>
+              <label class="field">
+                <span class="field-label">Max reply (tokens)</span>
+                <input id="f-max-tokens" type="number" min="1" step="64" value="1024">
+              </label>
+              <label class="field">
+                <span class="field-label">Temperature</span>
+                <input id="f-temperature" type="number" min="0" max="2" step="0.1" value="0.7">
+              </label>
+            </div>
+
+            <div class="review" id="f-review"></div>
+          </fieldset>
+
+        </form>
+      </section>
+
+      <!-- 8 · PAGE FOOTER — the wizard controls -->
+      <footer id="page-footer" data-layer="8">
+        <div class="wizard-nav">
+          <button class="btn btn-quiet" type="button" id="wz-back">Back</button>
+          <span class="muted small" id="wz-status">step 1 of 4</span>
+          <button class="btn btn-send" type="button" id="wz-next">Next</button>
+        </div>
+        <div class="composer-meta" id="wz-message"></div>
+      </footer>
+    </div>
+  </main>
+
+  <!-- 4 · GLOBAL FOOTER — three columns -->
+{{footer}}
+
+  <script src="../js/live.js"></script>
+  <script src="../js/wizard.js"></script>
+  <script src="../js/app.js"></script>
+  <script src="../js/approvals.js"></script>
+  <script src="../js/terminal.js"></script>
+  <script src="../js/page-specs.js"></script>
+  <script src="../js/notif.js"></script>
+  <div class="acct-veil" id="acct-veil" hidden role="dialog" aria-modal="true" aria-label="account profile">
+    <div class="acct-panel">
+      <div class="acct-head">
+        <span class="acct-title">Account</span>
+        <button class="acct-close" id="acct-close" type="button" aria-label="close">×</button>
+      </div>
+      <div class="acct-body" id="acct-body"><p class="muted small">loading…</p></div>
+    </div>
+  </div>
+  <script src="../js/account.js"></script>
+  <script src="../js/console-tap.js"></script>
+  <script src="../js/accent.js"></script>
+</body>
+</html>

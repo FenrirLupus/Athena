@@ -1,0 +1,400 @@
+{
+ "verbatim": [
+  {
+   "a": "Say ok.",
+   "b": "Say ok.",
+   "why": "identical"
+  },
+  {
+   "a": "reply with exactly: ok",
+   "b": "reply with exactly: ok",
+   "why": "identical"
+  },
+  {
+   "a": "hello, can you hear me?",
+   "b": "hello, can you hear me?",
+   "why": "identical"
+  },
+  {
+   "a": "echo exactly: web ok",
+   "b": "echo exactly: web ok",
+   "why": "identical"
+  },
+  {
+   "a": "one short sentence on bread",
+   "b": "one short sentence on bread",
+   "why": "identical"
+  }
+ ],
+ "near": [
+  {
+   "a": "Say ok.",
+   "b": "Say ok now.",
+   "why": "one word added"
+  },
+  {
+   "a": "reply with exactly: ok",
+   "b": "reply with exactly: ok please",
+   "why": "one word added"
+  },
+  {
+   "a": "hello, can you hear me?",
+   "b": "hello, can you hear me right now?",
+   "why": "words added"
+  },
+  {
+   "a": "echo exactly: web ok",
+   "b": "echo exactly: web ok again",
+   "why": "one word added"
+  },
+  {
+   "a": "how much space is free",
+   "b": "how much space is free today",
+   "why": "one word added"
+  }
+ ],
+ "paraphrase": [
+  {
+   "a": "say ok",
+   "b": "reply with ok",
+   "why": "synonym of the verb"
+  },
+  {
+   "a": "how much space is free",
+   "b": "how much disk is left",
+   "why": "synonyms on both sides"
+  },
+  {
+   "a": "reply with exactly: ok",
+   "b": "answer precisely: ok",
+   "why": "synonyms on both sides"
+  },
+  {
+   "a": "are you idle or busy",
+   "b": "are you free or working",
+   "why": "synonyms on both sides"
+  },
+  {
+   "a": "hello, can you hear me?",
+   "b": "are you listening",
+   "why": "greeting / check that someone is there"
+  },
+  {
+   "a": "one short sentence on bread, please",
+   "b": "one brief sentence about bread",
+   "why": "short/brief, sentence"
+  },
+  {
+   "a": "echo exactly: web ok",
+   "b": "repeat verbatim: web ok",
+   "why": "verbatim/echo"
+  },
+  {
+   "a": "edit the line in confirm mode",
+   "b": "edit the exact line in confirm mode",
+   "why": "paraphrase"
+  }
+ ],
+ "negative": [
+  {
+   "a": "reply with exactly WAKE1",
+   "b": "reply with exactly WAKE2",
+   "why": "different wake token",
+   "family": "identifier"
+  },
+  {
+   "a": "reply with exactly WAKE3",
+   "b": "reply with exactly WAKE9",
+   "why": "different wake token",
+   "family": "identifier"
+  },
+  {
+   "a": "is port 8765 open",
+   "b": "is port 8766 open",
+   "why": "different port",
+   "family": "identifier"
+  },
+  {
+   "a": "is port 8765 listening",
+   "b": "is port 9999 listening",
+   "why": "different port",
+   "family": "identifier"
+  },
+  {
+   "a": "read the file /tmp/a.log",
+   "b": "read the file /tmp/b.log",
+   "why": "different path",
+   "family": "identifier"
+  },
+  {
+   "a": "read the file /tmp/a.log",
+   "b": "read the file /var/a.log",
+   "why": "different path",
+   "family": "identifier"
+  },
+  {
+   "a": "deploy version 0.0.3",
+   "b": "deploy version 0.0.4",
+   "why": "different version",
+   "family": "identifier"
+  },
+  {
+   "a": "check lane id 7f3a",
+   "b": "check lane id 8b2c",
+   "why": "different id",
+   "family": "identifier"
+  },
+  {
+   "a": "open MEMORY.md",
+   "b": "open ASSISTANT.md",
+   "why": "different file",
+   "family": "identifier"
+  },
+  {
+   "a": "run disk_usage",
+   "b": "run mem_usage",
+   "why": "different tool",
+   "family": "identifier"
+  },
+  {
+   "a": "delete the file",
+   "b": "do not delete the file",
+   "why": "negated",
+   "family": "polarity"
+  },
+  {
+   "a": "start the service",
+   "b": "never start the service",
+   "why": "negated",
+   "family": "polarity"
+  },
+  {
+   "a": "remove the plugin",
+   "b": "do not remove the plugin",
+   "why": "negated",
+   "family": "polarity"
+  },
+  {
+   "a": "run the migration",
+   "b": "never run the migration",
+   "why": "negated",
+   "family": "polarity"
+  },
+  {
+   "a": "push the branch without the flag",
+   "b": "push the branch with the flag",
+   "why": "polarity of a modifier",
+   "family": "polarity"
+  },
+  {
+   "a": "install the pack unless it fails",
+   "b": "install the pack",
+   "why": "conditional dropped",
+   "family": "polarity"
+  },
+  {
+   "a": "send the report except the draft",
+   "b": "send the report",
+   "why": "exception dropped",
+   "family": "polarity"
+  },
+  {
+   "a": "close the port cannot reopen",
+   "b": "close the port",
+   "why": "negation dropped",
+   "family": "polarity"
+  },
+  {
+   "a": "install the plugin",
+   "b": "remove the plugin",
+   "why": "opposite verb",
+   "family": "antonym"
+  },
+  {
+   "a": "add the row",
+   "b": "delete the row",
+   "why": "opposite verb",
+   "family": "antonym"
+  },
+  {
+   "a": "enable the flag",
+   "b": "disable the flag",
+   "why": "opposite verb",
+   "family": "antonym"
+  },
+  {
+   "a": "remember this preference",
+   "b": "forget this preference",
+   "why": "opposite verb",
+   "family": "antonym"
+  },
+  {
+   "a": "check the state before deploy",
+   "b": "check the state after deploy",
+   "why": "opposite time",
+   "family": "antonym"
+  },
+  {
+   "a": "start the service",
+   "b": "stop the service",
+   "why": "opposite verb",
+   "family": "antonym"
+  },
+  {
+   "a": "lock the vault",
+   "b": "unlock the vault",
+   "why": "opposite verb",
+   "family": "antonym"
+  },
+  {
+   "a": "open the port",
+   "b": "close the port",
+   "why": "opposite verb",
+   "family": "antonym"
+  },
+  {
+   "a": "how much space is free",
+   "b": "is the disk space full",
+   "why": "same topic, different question",
+   "family": "topic"
+  },
+  {
+   "a": "what time is it",
+   "b": "what time was the last turn",
+   "why": "same topic, different question",
+   "family": "topic"
+  },
+  {
+   "a": "is the lane idle",
+   "b": "is the lane asleep",
+   "why": "same topic, different question",
+   "family": "topic"
+  },
+  {
+   "a": "what is the queue depth",
+   "b": "what is the queue limit",
+   "why": "same topic, different question",
+   "family": "topic"
+  },
+  {
+   "a": "how long since the last turn",
+   "b": "how long since the last error",
+   "why": "same topic, different question",
+   "family": "topic"
+  },
+  {
+   "a": "show the vault size",
+   "b": "show the index size",
+   "why": "same topic, different question",
+   "family": "topic"
+  },
+  {
+   "a": "which model is configured",
+   "b": "which provider is configured",
+   "why": "same topic, different question",
+   "family": "topic"
+  },
+  {
+   "a": "when was the backup taken",
+   "b": "when was the backup verified",
+   "why": "same topic, different question",
+   "family": "topic"
+  },
+  {
+   "a": "what did the last test say",
+   "b": "what did the last gate say",
+   "why": "same topic, different question",
+   "family": "topic"
+  },
+  {
+   "a": "is the server running",
+   "b": "is the timer running",
+   "why": "same topic, different question",
+   "family": "topic"
+  },
+  {
+   "a": "read the log",
+   "b": "read the config",
+   "why": "different object",
+   "family": "swapped"
+  },
+  {
+   "a": "reply with ok",
+   "b": "reply with web ok",
+   "why": "different object",
+   "family": "swapped"
+  },
+  {
+   "a": "check the vault",
+   "b": "check the index",
+   "why": "different object",
+   "family": "swapped"
+  },
+  {
+   "a": "open the assistant file",
+   "b": "open the user file",
+   "why": "different object",
+   "family": "swapped"
+  },
+  {
+   "a": "count the rows in memory",
+   "b": "count the rows in vault",
+   "why": "different object",
+   "family": "swapped"
+  },
+  {
+   "a": "summarise the sessions",
+   "b": "summarise the metrics",
+   "why": "different object",
+   "family": "swapped"
+  },
+  {
+   "a": "wake the scout lane",
+   "b": "wake the atlas lane",
+   "why": "different object",
+   "family": "swapped"
+  },
+  {
+   "a": "verify the temporal record",
+   "b": "verify the identity record",
+   "why": "different object",
+   "family": "swapped"
+  },
+  {
+   "a": "reply with one word",
+   "b": "reply with one sentence",
+   "why": "different unit",
+   "family": "quantity"
+  },
+  {
+   "a": "wait 2 days",
+   "b": "wait 3 days",
+   "why": "different number",
+   "family": "quantity"
+  },
+  {
+   "a": "keep five rows",
+   "b": "keep six rows",
+   "why": "different number",
+   "family": "quantity"
+  },
+  {
+   "a": "run three turns",
+   "b": "run four turns",
+   "why": "different number",
+   "family": "quantity"
+  },
+  {
+   "a": "quote 600 characters",
+   "b": "quote 900 characters",
+   "why": "different number",
+   "family": "quantity"
+  },
+  {
+   "a": "allow 40 candidates",
+   "b": "allow 20 candidates",
+   "why": "different number",
+   "family": "quantity"
+  }
+ ]
+}

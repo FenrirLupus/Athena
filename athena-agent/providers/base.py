@@ -1,0 +1,463 @@
+"""Provider adapter interface and the factory that picks one.
+
+An adapter turns a message list into {content, tool_calls, cost_usd}. Nothing else in the system
+knows how a provider works — core calls this and gets a normalised shape back.
+
+Supported wire formats (documentation/architecture/17-providers-and-models.md):
+
+    openai     /chat/completions     OpenAI, DeepSeek, OpenRouter, vLLM, llama.cpp, LM Studio, Ollama
+    anthropic  /v1/messages          Anthropic, and any gateway that keeps the Messages API
+    mock       offline               scripted replies for tests, no network at all
+
+A **local model is not a third format**. Athena downloads a GGUF into `models/`, starts a server for
+it, and points the `openai` adapter at `http://127.0.0.1:<port>/v1`. Local is a *base_url*, which is
+why running a downloaded model is exactly the same thing as using a custom URL.
+"""
+from __future__ import annotations
+
+import contextvars
+import json
+import os
+from contextlib import contextmanager
+from pathlib import Path
+from urllib.parse import urlparse
+
+from core.root import athena_root
+from core import durable
+from core import trace
+
+
+# Credential sidecar (core/credproxy.py). Empty means "sign requests here"; set at boot when the sidecar runs, in
+# which case the adapter sends no Authorization at all and the proxy adds one on the other side.
+PROXY: dict = {"url": "", "token": ""}
+
+
+# Which lane and turn a provider call belongs to. The turn loop binds this around each call so an adapter's own
+# line carries the same `channel#turn` prefix as the loop's → / ← pair — without every adapter signature growing
+# a tracing argument it would have to thread through, and without an adapter having to know what a turn is.
+_TRACE_SCOPE: contextvars.ContextVar = contextvars.ContextVar("athena_provider_trace", default={})
+
+
+@contextmanager
+def trace_scope(**fields):
+    """Bind `channel`/`turn` to every trace line emitted inside this block (a context var, so it crosses threads)."""
+    token = _TRACE_SCOPE.set({k: v for k, v in fields.items() if v is not None})
+    try:
+        # the same fields, handed to the emitter: an adapter's own helpers inherit the lane, not just the adapter's
+        # explicit `**scope_fields()` lines — one binding, two readers
+        with trace.lane_scope(str(fields.get("channel") or ""), turn=fields.get("turn")):
+            yield
+    finally:
+        _TRACE_SCOPE.reset(token)
+
+
+def scope_fields() -> dict:
+    """The bound channel/turn, for an adapter line: `trace.event(..., **scope_fields(), port=p)`."""
+    return dict(_TRACE_SCOPE.get())
+
+
+class ProviderError(RuntimeError):
+    """A provider call failed in a way the turn should surface, not retry forever."""
+
+
+class BaseProvider:
+    name = "base"
+
+    def call(self, messages: list[dict], *, tools: list[dict] | None = None,
+             max_tokens: int = 1024, temperature: float = 0.7) -> dict:
+        """Return {"content": str, "tool_calls": [...], "cost_usd": float, "finish_reason": str}."""
+        raise NotImplementedError
+
+    def describe(self) -> dict:
+        """What this provider is, for the resource panel and the logs (never includes a key)."""
+        return {"provider": self.name, "model": getattr(self, "model", "")}
+
+
+# -- credentials -----------------------------------------------------------
+
+# Where a wire format goes when it must not inherit another provider's endpoint. Used only when an agent
+# declares a provider that differs from the global one and gives no base_url of its own.
+DEFAULT_BASE_URLS = {
+    "openai": "https://api.openai.com/v1",
+    "anthropic": "https://api.anthropic.com",
+}
+
+ATHENA_ROOT = athena_root()
+SECRET_FILE = ATHENA_ROOT / ".secret"
+
+
+def secret_path(root=None) -> Path:
+    """Where an agent's keys live: its own `.secret`, or the global one.
+
+    Two scopes, one rule — **local shadows global**:
+      * `~/.athena/profiles/<agent>/.secret`   that agent's own keys (a separate key, a separate account)
+      * `~/.athena/.secret`                    keys shared by every agent
+    The profile file is checked first, so an agent with its own key never picks up the shared one by accident.
+    """
+    return (Path(root) / ".secret") if root else SECRET_FILE
+
+
+def read_secrets(root=None) -> dict:
+    """`{NAME: value}` from one `.secret` file. Names are upper-case env-style; comments ignored."""
+    out: dict[str, str] = {}
+    path = secret_path(root)
+    try:
+        with open(path, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                name, _, value = line.partition("=")
+                out[name.strip().upper()] = value.strip()
+    except OSError:
+        pass
+    return out
+
+# Environment names tried per format, most specific first.
+ENV_NAMES = {
+    "openai": ("ATHENA_API_KEY", "OPENAI_API_KEY", "DEEPSEEK_API_KEY", "OPENROUTER_API_KEY"),
+    "anthropic": ("ATHENA_API_KEY", "ANTHROPIC_API_KEY", "CLAUDE_API_KEY"),
+}
+
+
+# Host fragments -> the conventional env-style secret name. The file is `.secret` but its lines read
+# exactly like a dotenv, so the same value works whether Athena reads it, `export`ed into a shell, or
+# pasted into a service definition.
+HOST_SECRETS = (
+    ("deepseek", "DEEPSEEK_API_KEY"),
+    ("openrouter", "OPENROUTER_API_KEY"),
+    ("openai", "OPENAI_API_KEY"),
+    ("anthropic", "ANTHROPIC_API_KEY"),
+    ("claude", "ANTHROPIC_API_KEY"),
+    ("mistral", "MISTRAL_API_KEY"),
+    ("groq", "GROQ_API_KEY"),
+    ("together", "TOGETHER_API_KEY"),
+    ("fireworks", "FIREWORKS_API_KEY"),
+    ("localhost", "ATHENA_API_KEY"),
+    ("127.0.0.1", "ATHENA_API_KEY"),
+)
+
+
+def secret_name(provider: str, base_url: str = "") -> str:
+    """The ALL-CAPS variable that holds this endpoint's key.
+
+    A key is a property of the endpoint, not of the agent: two agents pointed at DeepSeek share one
+    `DEEPSEEK_API_KEY`, which is also what a human would `export` when running curl. Named after the host
+    when one is recognised, otherwise `<PROVIDER>_API_KEY`, and `ATHENA_API_KEY` for anything local.
+    """
+    host = ""
+    try:
+        host = (urlparse(base_url or "").hostname or "").lower()
+    except ValueError:
+        host = ""
+
+    for fragment, name in HOST_SECRETS:
+        if fragment in host:
+            return name
+    if provider in ("anthropic", "claude"):
+        return "ANTHROPIC_API_KEY"
+    if provider in ("openai", "deepseek", "openrouter", "vllm", "custom"):
+        return "OPENAI_API_KEY"
+    upper = "".join(ch if ch.isalnum() else "_" for ch in (provider or "athena")).upper()
+    return f"{upper}_API_KEY" if upper else "ATHENA_API_KEY"
+
+
+def _secret_lines(path: Path | None) -> dict[str, str]:
+    """One `.secret` file as name → value, lowercased names, comments skipped."""
+    out: dict[str, str] = {}
+    if not path:
+        return out
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+    except OSError:
+        return out
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        name, _, value = line.partition("=")
+        out.setdefault(name.strip().lower(), value.strip().strip('"').strip("'"))
+    return out
+
+
+def _registry(athena_root: Path) -> dict:
+    try:
+        data = json.loads((Path(athena_root) / "provider.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _registry_entry(registry: dict, kind: str, base_url: str) -> tuple[str, dict] | None:
+    """The provider.json entry for this endpoint: exact base_url first, then host, then the label."""
+    host = ""
+    try:
+        host = (urlparse(base_url or "").hostname or "").lower()
+    except ValueError:
+        host = ""
+    for name, entry in registry.items():
+        if not isinstance(entry, dict):
+            continue
+        if base_url and str(entry.get("base_url") or "") == base_url:
+            return str(name), entry
+    for name, entry in registry.items():
+        if not isinstance(entry, dict):
+            continue
+        try:
+            entry_host = (urlparse(str(entry.get("base_url") or "")).hostname or "").lower()
+        except ValueError:
+            entry_host = ""
+        if host and entry_host and host == entry_host:
+            return str(name), entry
+    if kind and isinstance(registry.get(kind), dict):
+        return kind, registry[kind]
+    return None
+
+
+def _registry_key_name(entry: dict, lane: str) -> str:
+    """The key line the registry names: this lane's own entry first, then the global one, then the first named."""
+    keys = [k for k in (entry.get("keys") or []) if isinstance(k, dict) and (k.get("name") or "").strip()]
+    if not keys:
+        return ""
+    if lane:
+        for key in keys:
+            if str(key.get("agent") or "") == lane:
+                return str(key.get("name")).strip()
+    for key in keys:
+        if str(key.get("scope") or "") in ("global", ""):
+            return str(key.get("name")).strip()
+    return str(keys[0].get("name")).strip()
+
+
+def resolve_key(model_cfg: dict, *, root=None, lane: str = "") -> dict:
+    """Which `.secret` line holds this endpoint's key, and where that answer came from.
+
+    One function, used by `build()`, by the wake check, by the wizard and by `lane` — so "can this lane start"
+    and "will the adapter find a key" cannot disagree. Never raises; returns `source="none"` with `looked`
+    naming every place it tried.
+
+    Precedence (design: proposals/lane-bootstrap-integrity/design.md §4.3): a declared name in the lane's own
+    `.secret`, then in the shared one, then the registry by endpoint, then by label, then the wire-format line,
+    then the environment. A declared name that resolves nowhere **stops** — it is a fault, not a hint to borrow
+    the wire-format line, which is how two agents end up sharing one account without anyone deciding that.
+    """
+    model = model_cfg or {}
+    declared = str(model.get("key_name") or model.get("api_key") or "").strip()
+    kind = str(model.get("provider") or "").lower()
+    base_url = str(model.get("base_url") or "")
+    profile = Path(root) if root else None
+    install = profile.parent.parent if profile and profile.parent.name == "profiles" else SECRET_FILE.parent
+    lane_file = (profile / ".secret") if profile else None
+    global_file = install / ".secret"
+    lane_lines = _secret_lines(lane_file)
+    global_lines = _secret_lines(global_file)
+    looked: list[str] = []
+    result = {"name": "", "value": "", "source": "none", "declared": declared,
+              "registry": "", "lane": lane or (profile.name if profile else ""), "looked": looked}
+
+    def _hit(name: str, source: str, registry_entry: str = "") -> dict:
+        needle = name.strip().lower()
+        looked.append(f"{source}:{name}")
+        if needle in lane_lines:
+            result.update({"name": name, "value": lane_lines[needle], "source": source,
+                           "registry": registry_entry})
+            return result
+        if needle in global_lines:
+            result.update({"name": name, "value": global_lines[needle], "source": "global-secret",
+                           "registry": registry_entry})
+            return result
+        result.update({"name": name, "value": "", "source": source, "registry": registry_entry})
+        return result
+
+    if declared:
+        return _hit(declared, "lane-secret" if declared.lower() in lane_lines else "declared-missing")
+
+    registry = _registry(install)
+    entry = _registry_entry(registry, kind, base_url)
+    if entry:
+        label, payload = entry
+        name = _registry_key_name(payload, lane or (profile.name if profile else ""))
+        if name:
+            hit = _hit(name, f"registry:{label}", registry_entry=label)
+            if hit["value"]:
+                return hit
+            looked.append(f"registry:{label}:{name}:absent")
+
+    # today's rule, unchanged: a line named for the wire format, a bare first line, then the environment
+    fallback = api_key(kind, "", root=root)
+    if fallback:
+        name = kind.upper() if kind else secret_name(kind, base_url)
+        result.update({"name": name if name else "", "value": fallback, "source": "wire-format"})
+        looked.append("wire-format/environment")
+        return result
+
+    for env_name in ENV_NAMES.get(kind, ("ATHENA_API_KEY",)) + (secret_name(kind, base_url),):
+        if os.environ.get(env_name, "").strip():
+            result.update({"name": env_name, "value": os.environ[env_name].strip(), "source": "environment"})
+            looked.append(f"environment:{env_name}")
+            return result
+
+    trace.event("provider.key.missing", level="debug", kind=kind, key_name=declared or "-",
+                files=len(looked), env_tried=len(ENV_NAMES.get(kind, ("ATHENA_API_KEY",))),
+                source="none", registry=result["registry"])
+    return result
+
+
+def write_secret(name: str, value: str, root=None) -> Path:
+    """Store a key in `.secret` under `name`, replacing any existing line, with owner-only permissions.
+
+    The setup wizard collects a key once and this is the only place it lands: never config.yaml (which
+    gets pasted into issues and read by the agent), never the profile directory (which gets copied and
+    archived), never a log line.
+    """
+    name = (name or "").strip().upper()
+    value = (value or "").strip()
+    if not name or not value:
+        raise ProviderError("a secret needs both a name and a value")
+    if any(ch in name for ch in "=\n\r"):
+        raise ProviderError("a secret name cannot contain '=' or a newline")
+    if not all(ch.isalnum() or ch == "_" for ch in name):
+        raise ProviderError(f"secret name {name!r} must be A-Z, 0-9 and _ (an env-style variable)")
+
+    target = secret_path(root)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    lines: list[str] = []
+    if target.exists():
+        lines = target.read_text(encoding="utf-8").splitlines()
+    out, replaced = [], False
+    for line in lines:
+        if line.split("=", 1)[0].strip() == name and "=" in line:
+            out.append(f"{name}={value}")
+            replaced = True
+        else:
+            out.append(line)
+    if not replaced:
+        out.append(f"{name}={value}")
+    # `target`, never the module-level SECRET_FILE: with `root=` the write must land in that profile's file.
+    # Writing to SECRET_FILE here truncated the GLOBAL secret file and destroyed every other key in it —
+    # Writing to the module-level path here truncates the shared secret file and destroys every other key in it.
+    return durable.write_secret(target, "\n".join(out) + "\n")
+
+
+def api_key(kind: str, name: str = "", root=None) -> str:
+    """The key for a format: the agent's own file, then the shared one, then the environment.
+
+    Precedence, in order — **local shadows global**:
+      1. `<profile>/.secret` — this agent's own key (a separate account, a separate quota)
+      2. `~/.athena/.secret` — keys shared by every agent
+      3. the environment — how a launcher or a service supplies a key without writing a file
+
+    Within a file: a line named by `name` (the agent's `model.key_name`) wins over a line named for the
+    format (`deepseek`), which wins over a bare first line. Config never holds a secret.
+    """
+    roots = []
+    if root:
+        roots.append(Path(root))
+    roots.append(SECRET_FILE.parent)
+
+    for base in roots:
+        path = base / ".secret"
+        named = explicit = fallback = ""
+        try:
+            with open(path, encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    if "=" in line:
+                        key_name, _, value = line.partition("=")
+                        key_name = key_name.strip().lower()
+                        if name and key_name == name.strip().lower():
+                            named = value.strip()
+                        elif key_name == kind:
+                            explicit = value.strip()
+                    elif not fallback:
+                        fallback = line
+        except OSError:
+            continue
+        if named:
+            return named
+        if explicit or fallback:
+            return explicit or fallback
+
+    for env in ENV_NAMES.get(kind, ("ATHENA_API_KEY",)):
+        val = os.environ.get(env)
+        if val and val.strip():
+            return val.strip()
+    # no key anywhere: the adapter will refuse the call, and this line is the only one that says where it looked
+    # (`key_name=`, not `name=`: `trace.event`'s first parameter IS `name`, so passing it again raised TypeError
+    # and turned "no key" into a crash — a missing key must be a line in the trail, not an exception)
+    trace.event("provider.key.missing", level="debug", kind=kind, key_name=(name or "-"),
+                files=len(roots), env_tried=len(ENV_NAMES.get(kind, ("ATHENA_API_KEY",))))
+    return ""
+
+
+
+
+# -- factory ---------------------------------------------------------------
+
+def build(cfg: dict, key_name: str = "", root=None) -> BaseProvider:
+    """Instantiate the adapter named in the config; a local model starts its server lazily.
+
+    `key_name` selects the agent's own line in `.secret`; when it is empty the name is resolved by `resolve_key`
+    from the endpoint and the installation's registry, so the adapter and the wake check cannot disagree about
+    which line holds the key.
+    """
+    model = cfg.get("model") or {}
+    kind = (model.get("provider") or "mock").lower()
+    local = model.get("local") or {}
+    model_name = str(model.get("name") or "")
+    if not key_name and kind not in ("mock", "local"):
+        resolved = resolve_key(model, root=root, lane=Path(root).name if root else "")
+        key_name = str(resolved.get("name") or "")
+    endpoint = ""
+    try:
+        endpoint = (urlparse(str(model.get("base_url") or "")).hostname or "")
+    except ValueError:
+        endpoint = ""
+
+    def _chosen(adapter: str, reason: str) -> None:
+        """One line per selection: which adapter, for which model, and the rule that picked it.
+
+        A provider that was silently inherited (or silently replaced because it would not build) is the shape of
+        bug this exists for — the channel's own `provider.fallback` says when that happens.
+        """
+        trace.event("provider.select", level="debug", chosen=adapter, kind=kind, model=model_name or "-",
+                    endpoint=endpoint or "-", reason=reason)
+
+    # local wins over `provider`: enabling it is an explicit statement about where answers come from, and
+    # a config that says `provider: mock, local.enabled: true` must not quietly keep answering from the mock
+    if local.get("enabled"):
+        _chosen("local", "local.enabled")
+        from providers.local import LocalProvider
+        return LocalProvider(cfg)
+
+    if kind == "mock":
+        _chosen("mock", "provider=mock")
+        from providers.mock import MockProvider
+        return MockProvider(model_name=str(model.get("name") or "mock-1"))
+
+    if kind in ("openai", "deepseek", "lmstudio", "llamacpp", "ollama", "vllm", "custom"):
+        _chosen("openai", f"provider={kind}")
+        from providers.openai_compat import OpenAICompatProvider
+        return OpenAICompatProvider(
+            base_url=str(model.get("base_url") or ""),
+            model=str(model.get("name") or ""),
+            key_name=key_name,
+            secret_root=root,
+        )
+
+    if kind in ("anthropic", "claude"):
+        _chosen("anthropic", f"provider={kind}")
+        from providers.anthropic import AnthropicProvider
+        return AnthropicProvider(
+            base_url=str(model.get("base_url") or "https://api.anthropic.com"),
+            model=str(model.get("name") or "claude-sonnet-4-5"),
+            key_name=key_name,
+            secret_root=root,
+        )
+
+    # a refusal is a `✗`, not a `·`: this build produced no provider, and the frame that decided is recorded
+    trace.failure("provider.refused", None, kind=kind, model=model_name or "-",
+                  reason="unknown provider", known="openai, anthropic, mock")
+    raise ProviderError(f"unknown provider: {kind} (expected openai, anthropic or mock)")

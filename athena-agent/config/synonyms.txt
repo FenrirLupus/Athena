@@ -1,0 +1,39 @@
+# config/synonyms.txt — words that mean the same thing *in one sense*.
+# One group per line; every token on the line is a member. A word may appear in at most two
+# groups (a genuine second sense). Not allowed: function words, tokens with a digit, tokens of
+# 16+ characters, phrases, wildcards, or two antonyms in one group.
+# See proposals/recall/design-two-check.md §3.
+#
+# This file is the semantic check's whole quality. Edit it and re-run:
+#   scripts/recall_probe.py --pairs      the labelled table it moves
+#   scripts/recall_probe.py --synonyms   group counts, and every word in two groups
+
+# sense: to utter
+say reply answer respond tell echo repeat
+
+# sense: without variation
+exactly precisely verbatim
+
+# sense: assent
+ok okay fine agreed
+
+# sense: the volume on a device
+disk space storage capacity room
+
+# sense: what remains of a quantity; `available` bridges to the not-occupied sense of free
+left remaining spare available
+
+# sense: not occupied — free's second sense, and the reason it sits in two groups
+free idle available unused
+
+# sense: an opening, or a check that someone is there
+hello hey hi greetings hear listen listening
+
+# sense: a lane's resting state versus a working one
+busy working occupied
+
+# sense: a short span of prose
+sentence line phrase
+
+# sense: brief
+short brief quick

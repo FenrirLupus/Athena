@@ -1,0 +1,395 @@
+"""The turn loop — call the model, run what it asks for, repeat until it answers.
+
+Five statements (documentation/architecture/02-turn-loop.md):
+
+    call → if tool calls, run them and append → if it answered, finish
+         → any step may exit early → finalise
+
+Invariants kept from that document:
+  * retry/error handling wraps the model call, never a side-effecting tool
+  * every tool call gets a result appended, including refusals
+  * a turn that hits its budget still returns prose, never a truncated tool call
+"""
+from __future__ import annotations
+
+import re as mode_mod
+import time
+
+from context import stack as stack_mod
+from core import trace
+from core.budget import IterationBudget
+from core.context_window import effective_window
+
+
+class TurnResult(dict):
+    """A dict with attribute access, so callers can read result["status"] or result.status."""
+
+    def __getattr__(self, name):
+        try:
+            return self[name]
+        except KeyError as exc:                       # noqa: TRY003
+            raise AttributeError(name) from exc
+
+
+@trace.lane_bound
+def run_turn(*, channel: str, channel_root, session, provider, tools_registry,
+             instructions: str, user_text: str, cfg: dict,
+             budget: IterationBudget | None = None,
+             mode: str = "chat",
+             interrupts=None,
+             anchor: str = "") -> TurnResult:
+    """Run one turn. `interrupts` is an optional callable returning notices that arrived mid-turn.
+
+    `instructions` may be a string or a callable returning one. A callable is resolved at **each iteration**, so
+    anything in it that changes during a turn — the peers and their states, for instance — is current at
+    the moment the model is asked, not stale from the turn's first call.
+
+    An interruption cannot rewrite a prompt that has already been sent, so the notice is applied at the
+    **next safe point**: the iteration boundary, before the next model call. That is the honest meaning of
+    "adjust while thinking" — the agent sees the new information on its next call, not during one it has
+    already made. Anything else would be claiming a model can be interrupted mid-token.
+    """
+    """Run one turn for one channel and return the result record."""
+    b = cfg.get("budget") or {}
+    model = cfg.get("model") or {}
+    from core import budget as budget_mod
+
+    budget = budget or IterationBudget(
+        max_turns=int(b.get("max_iterations") or 100),
+        max_usd=float(b.get("max_turn_usd") or 0.50),
+        grace_calls=int(b.get("grace_calls") or 1),
+    )
+    budget_mod.enter(channel, budget)                  # a subagent spawned in this turn carves from HERE
+
+    session.add("user", user_text)
+    started = time.time()
+    # the profile's own calibration: estimate and budget must be in the units the provider charges in
+    from context import calibration as calibration_mod
+    try:
+        described = provider.describe() if hasattr(provider, "describe") else {}
+    except Exception:                                  # noqa: BLE001 — a provider must not break a turn
+        described = {}
+    model_key = f"{described.get('provider') or model.get('provider') or '?'}:" \
+                f"{described.get('model') or model.get('name') or '?'}"
+    factor = calibration_mod.factor_for(channel_root, model_key)
+    prov_name = str(described.get("provider") or model.get("provider") or "?")
+    model_name = str(described.get("model") or model.get("name") or "?")
+    # the whole turn is one lane: every line below reads as a heartbeat against this opening frame
+    trace.event("turn.start", level="info", channel=channel, mode=mode, provider=prov_name,
+                model=model_name, max_turns=budget.max_turns, max_usd=budget.max_usd)
+    status = "completed"
+    reply = ""
+    calls = 0
+    tool_names_used: list[str] = []
+    tool_rounds = 0
+    # measurable per turn: tokens are what the provider reports, seconds are what the caller waits
+    usage_totals = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        # the required procedures attached to this turn, recorded with the result
+    procedures: list[str] = []
+    model_calls: list[dict] = []
+    last_report: dict = {}
+    notes: list[dict] = []
+    injected = 0
+    system_text = ""
+
+    try:
+        while True:
+            if not budget.consume_turn():
+                status = budget.exhausted_reason() or "exhausted_budget"
+                trace.event("turn.exhausted", level="info", channel=channel, turn=budget.turns,
+                            reason=status, calls=calls, tool_rounds=tool_rounds,
+                            cost_usd=round(budget.cost_usd, 6), max_usd=budget.max_usd)
+                break
+            calls += 1
+            trace.event("turn.iteration", level="debug", channel=channel, turn=calls,
+                        of=budget.max_turns, tool_rounds=tool_rounds,
+                        cost_usd=round(budget.cost_usd, 6), ceiling_usd=budget.max_usd)
+
+            # compression happens at the turn boundary, before assembly — never mid-turn
+            prompt_estimate = int((last_report or {}).get("prompt_tokens_est") or 0)
+            compressed = _maybe_compress(session, cfg, factor, provider, prompt_estimate)
+            if compressed:
+                notes.append(compressed)
+
+                        # interruptions are applied at the iteration boundary, so they affect the next model call
+            if interrupts is not None:
+                try:
+                    pending_notices = interrupts() or []
+                except Exception:                     # noqa: BLE001 — an inbox must never break a turn
+                    pending_notices = []
+                for notice in pending_notices:
+                    session.add("user", notice)
+                    injected += 1
+
+            # resolved per iteration: a roster in the instructions has to describe the hive NOW
+            live_instructions = instructions() if callable(instructions) else instructions
+            # Required procedures are not optional reading: if the user's message triggers one, it is attached to
+            # the instructions for this turn, in the system block, where the agent cannot mistake it for a skill.
+            try:
+                from core import instruction_docs
+
+                matched = instruction_docs.select(user_text)
+                procedure = instruction_docs.render(user_text)
+                if procedure:
+                    live_instructions = f"{live_instructions}\n\n{procedure}"
+                    procedures = [doc["name"] for doc in matched]
+            except Exception:                     # noqa: BLE001 — a missing folder must not break a turn
+                pass
+            messages, report = stack_mod.build(
+                live_instructions, channel_root, session.history(), user_text, cfg,
+                summary=session.summary_text(), factor=factor, channel=channel, anchor=anchor)
+            # A prompt is paid for on every turn, so its size is a latency setting, not just a storage one: a
+            # large context window made "compress when nearly full" mean "never", and every reply carried the
+            # whole transcript. Oldest turns are dropped to meet the budget; the system block and the newest
+            # message are never dropped, so the agent keeps its instructions and the question it was asked.
+            # Call mode only: a spoken exchange needs the last few turns, not the whole thread. Chat keeps its
+            # history untouched, because there the earlier conversation is the point.
+            prompt_budget = 0
+            if mode == "call":
+                prompt_budget = int((cfg.get("call") or {}).get("prompt_budget_tokens") or 0)
+            if prompt_budget > 0:
+                trimmed = _trim_to_budget(messages, prompt_budget)
+                if trimmed:
+                    notes.append(f"trimmed {trimmed} older message(s) to fit a {prompt_budget}-token prompt budget")
+            last_report = report
+            # keep the assembled system block so "what was the model actually told" is answerable
+            # without trusting the model's account of its own instructions
+            system_text = messages[0].get("content", "") if messages else ""
+
+            tool_schemas = tools_registry.schemas()
+            call_started = time.perf_counter()
+            try:
+                # one → and one ← per call: that pair is the heartbeat a transcript is read against
+                with trace.span("model.call", channel=channel, turn=calls, provider=prov_name,
+                                model=model_name, mode=mode, messages=len(messages),
+                                prompt_est=prompt_estimate or _estimate_tokens(messages),
+                                tools=len(tool_schemas), stream=False,
+                                max_tokens=int(model.get("max_output_tokens") or 1024)) as sp:
+                    # the adapter's own lines inherit this lane/turn, so wire detail sorts with the pair
+                    from providers import base as provider_base
+
+                    with provider_base.trace_scope(channel=channel, turn=calls):
+                        resp = provider.call(
+                            messages,
+                            tools=tool_schemas,
+                            max_tokens=int(model.get("max_output_tokens") or 1024),
+                            temperature=float(model.get("temperature") or 0.7),
+                        )
+                    call_seconds = round(time.perf_counter() - call_started, 3)
+                    call_usage = resp.get("usage") or {}
+                    call_prompt = int(call_usage.get("prompt_tokens") or call_usage.get("input_tokens") or 0)
+                    call_done = (int(call_usage.get("completion_tokens") or call_usage.get("output_tokens") or 0)
+                                 + int(call_usage.get("reasoning_tokens") or 0))
+                    sp.ok(prompt_tokens=call_prompt, completion_tokens=call_done,
+                          finish=resp.get("finish_reason") or "?",
+                          tool_calls=len(resp.get("tool_calls") or []),
+                          seconds=call_seconds)
+            except Exception as exc:                  # noqa: BLE001 — model call failures are per-turn
+                # NOT a system message: appending one mid-conversation is the trap doc 02 names, and a
+                # template that requires "system first" then rejects every later turn. The failure is
+                # reported in the turn result and the trace, never injected into the transcript.
+                text = str(exc)
+                # A provider that has run out of credit answers 402, and that is not a bug in the turn: it is a
+                # state the operator has to change. It gets its own status so nothing retries it as if it were a
+                # transient API fault, and so the interface can say what to do rather than echoing a stack line.
+                if "402" in text or "insufficient" in text.lower() or "quota" in text.lower():
+                    status = "error_balance"
+                    trace.event("turn.status", level="info", channel=channel, turn=calls,
+                                status=status, why="provider refused: no remaining balance",
+                                provider=prov_name)
+                    reply = ("The provider refused this turn: the account has no remaining balance. "
+                             "Top up the provider, or point this agent at a local model "
+                             "(model.provider: local in its config.yaml).")
+                else:
+                    status = "error_api"
+                    trace.event("turn.status", level="info", channel=channel, turn=calls,
+                                status=status, why="model call failed", provider=prov_name,
+                                exc=text[:200])
+                    reply = f"model call failed: {text}"
+                break
+
+            usage_totals["prompt_tokens"] += call_prompt
+            usage_totals["completion_tokens"] += call_done
+            usage_totals["total_tokens"] += (int(call_usage.get("total_tokens") or 0)
+                                             or call_prompt + call_done)
+            # learn from what the provider billed: this is the only place the true token count exists
+            if call_usage.get("prompt_tokens") and last_report.get("est_raw"):
+                learned = calibration_mod.update(channel_root, int(last_report["est_raw"]),
+                                                 int(call_usage["prompt_tokens"]), model_key)
+                factor = float(learned.get("factor") or factor)
+            model_calls.append({
+                "index": len(model_calls) + 1, "seconds": call_seconds,
+                "prompt_tokens": call_prompt, "completion_tokens": call_done,
+                "finish_reason": resp.get("finish_reason") or "",
+                "tool_calls": len(resp.get("tool_calls") or []),
+            })
+
+            # cost is computed here when the provider does not price itself: providers know tokens, the
+            # price is an operator setting, and a turn that silently costs 0.00 breaks the budget guard
+            cost = resp.get("cost_usd")
+            # `not cost`, not `is None`: providers that do not price themselves return 0.0 (or omit it), and an
+                        # an explicit zero would record $0.0000 for every local turn, so a zero falls back to the setting
+            # metrics log computed the real figure, so `max_turn_usd` could never trip.
+            if not cost:
+                rate = float((cfg.get("metrics") or {}).get("usd_per_mtok") or 1.0)
+                cost = (call_prompt + call_done) / 1_000_000 * rate
+            budget.record_cost(cost)
+
+            if budget.exhausted() and not resp.get("tool_calls"):
+                # spent the ceiling and still got an answer — that is a completed turn
+                status = "completed"
+                trace.event("budget.spent", level="info", channel=channel, turn=calls,
+                            reason=budget.exhausted_reason() or "ceiling reached",
+                            cost_usd=round(budget.cost_usd, 6), max_usd=budget.max_usd,
+                            status="completed")
+            content = resp.get("content") or ""
+            tool_calls = resp.get("tool_calls") or []
+
+            if not tool_calls:
+                # Before the answer becomes final, check whether something arrived while the model was
+                # answering. A single-call turn has no tool round to interrupt, so without this the
+                # notice could only be dropped — an agent that cannot acknowledge new input until its
+                # next task has not really been interrupted.
+                late = []
+                if interrupts is not None:
+                    try:
+                        late = interrupts() or []
+                    except Exception:                 # noqa: BLE001
+                        late = []
+                if late:
+                    for notice in late:
+                        session.add("user", notice)
+                        injected += 1
+                    continue                          # one more pass, bounded by the iteration budget
+                reply = content
+                break
+
+            tool_names_used.extend(str(c.get("name") or "") for c in tool_calls)
+            # the model asked for tools: record the call, run each, answer every one
+            session.add_assistant_tool_calls(mode_mod.sub(r"^\s*\[(?:Voice|Message)\]\s*", "", content or ""),
+                                             tool_calls)
+            tool_rounds += 1
+            for call in tool_calls:
+                call_id = call.get("id") or f"call_{tool_rounds}_{len(call)}"
+                name = call.get("name") or ""
+                args = call.get("arguments") or {}
+                result = tools_registry.invoke(name, args, timeout=float((cfg.get("tools") or {}).get("timeout_s") or 60))
+                session.add_tool_result(call_id, name, result)
+
+    except Exception as exc:                          # noqa: BLE001 — the turn must always return
+        status = "error_loop"
+        reply = f"loop error: {exc}"
+        trace.failure("turn.error", exc, channel=channel, turn=calls, status=status,
+                      tool_rounds=tool_rounds, calls=calls)
+
+    from core import budget as budget_mod
+    budget_mod.leave(channel)
+
+    if not reply and status.startswith("exhausted"):
+        reply = ("I ran out of budget before finishing. Here is where I got to: "
+                 f"{tool_rounds} tool round(s), {calls} model call(s).")
+
+    # The marker is ours to write, not the model's: the agent reads the marked history and will imitate the prefix,
+    # so one the model emits is removed before it is stored, spoken or shown. The marker is then added exactly once.
+    if reply:
+        reply = __import__("re").sub(r"^\s*\[(?:Voice|Message)\]\s*", "", reply)
+    session.add("assistant", ("[Voice] " if mode == "call" else "[Message] ") + reply if reply else reply)
+    # the turn closes with the numbers that decide what the operator does next: outcome, spend, time
+    trace.event("turn.end", level="info", channel=channel, turn=calls, status=status,
+                calls=calls, tool_rounds=tool_rounds, tools_used=len(tool_names_used),
+                tokens=usage_totals["total_tokens"], cost_usd=round(budget.cost_usd, 6),
+                seconds=round(time.time() - started, 3))
+    return TurnResult({
+        "channel": channel,
+        "status": status,
+        "reply": reply,
+        "calls": calls,
+        "tool_rounds": tool_rounds,
+        "tool_names": tool_names_used,
+        "budget": budget.snapshot(),
+        "prompt": last_report,
+        "system_prompt": system_text[-3000:],
+        "compressions": notes,
+        "procedures": procedures,
+        "interruptions": injected,
+        "seconds": round(time.time() - started, 3),
+        "usage": usage_totals,
+        "model_calls": model_calls,
+    })
+
+
+from core.tokens import messages_tokens as _estimate_tokens   # one estimator, shared with the session
+
+
+def _trim_to_budget(messages, budget):
+    """Drop the oldest non-system messages until the prompt fits the budget, keeping the newest one."""
+    dropped = 0
+    while len(messages) > 2 and _estimate_tokens(messages) > budget:
+        drop_at = 1 if messages[0].get("role") == "system" else 0
+        if drop_at >= len(messages) - 1:
+            break
+        messages.pop(drop_at)
+        dropped += 1
+    return dropped
+
+
+def _maybe_compress(session, cfg: dict, factor: float = 1.0, provider=None,
+                    prompt_tokens: int = 0) -> dict | None:
+    """Compress when the CONTEXT WINDOW is filling, not when history has filled its share.
+
+    Two thresholds, as configured (`compression.threshold_soft_pct` / `threshold_hard_pct`):
+      * **soft (80 %)** — the window is getting full: compress if there are turns to evict.
+      * **hard (90 %)** — compress regardless, because the next turn may not fit at all.
+
+    Thresholds are measured against the assembled prompt (`prompt_tokens`), because that is what the model is
+    sent. Measuring against the history block alone could never reach 80 % while history is capped at 30 %.
+    """
+    b = cfg.get("budget") or {}
+    c = cfg.get("compression") or {}
+    win = effective_window(cfg)
+    soft = float(c.get("threshold_soft_pct", 80.0)) / 100.0
+    hard = float(c.get("threshold_hard_pct", 90.0)) / 100.0
+    history_share = int(win * float(b.get("history_pct", 30.0)) / 100 + 0.5)
+    keep_frac = float(c.get("keep_after_compress_pct", 50)) / 100.0
+
+    msgs = session.history()
+    used = sum(stack_mod.message_tokens(m, factor) for m in msgs)
+    fill = (prompt_tokens / win) if win and prompt_tokens else 0.0
+
+    if fill >= hard:
+        pass                                   # must compress, even with little history
+    elif fill >= soft:
+        if len(msgs) < 4:
+            return None                        # nothing to evict yet
+    else:
+        return None
+
+    # Evict the oldest turns until what remains fits the keep fraction. At the HARD threshold, also refuse to
+    # keep more than the last exchange: "compress regardless" has to mean it frees space even when the history
+    # block was under its share — otherwise a nearly-full window would compact nothing and stay full.
+    keep_target = history_share * keep_frac
+    keep_floor = 2 if fill >= hard else 0
+    running = used
+    evict = 0
+    for m in msgs:
+        if len(msgs) - evict <= keep_floor:
+            break
+        # at the hard threshold the keep target does not stop the eviction — only the floor does
+        if fill < hard and running <= keep_target:
+            break
+        running -= stack_mod.message_tokens(m, factor)
+        evict += 1
+    if evict <= 0:
+        return None
+    evicted_span = msgs[:evict]
+    # the digest is written by the turn's own provider (context/digest.py), with the mechanical one as fallback
+    from context import digest as digest_mod
+    result = session.compress(evict, digest_fn=digest_mod.digest_for(provider, cfg))
+    try:                                    # evicted turns are offered, never promoted; memory stays the agent's choice
+        from tools import memory as memory_tools
+        memory_tools.offer_candidates(getattr(session, "root", None), evicted_span)
+    except Exception:                       # noqa: BLE001 — a full disk must not stop a turn
+        pass
+    return {"evicted": result.get("evicted"), "retained": result.get("retained"),
+            "snapshot": result.get("snapshot"), "vaulted": result.get("vaulted"),
+            "summary_written": result.get("summary_written")}
