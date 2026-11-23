@@ -20,13 +20,26 @@ with an `install.sh` in it — `install.sh` finds them by looking.
 
 ## Install
 
-Linux, any distribution, through Distrobox:
+Linux, any distribution, through Distrobox — clone first, or download the one file and let it fetch the rest:
 
 ```bash
+# from a clone
 git clone https://github.com/FenrirLupus/Athena && cd Athena
 ./install.sh --list
 ./install.sh --install
+
+# or just the front door: it fetches the branch it came from into a temporary tree and runs from there
+curl -fsSL https://raw.githubusercontent.com/FenrirLupus/Athena/alpha-0.0.4/install.sh -o /tmp/athena-install.sh
+bash /tmp/athena-install.sh --list
+bash /tmp/athena-install.sh --install
 ```
+
+`--list` says what this machine can install and what each platform needs; `--install` detects it, shows the plan,
+asks once, then runs `<platform>/install.sh`. Add `--dry-run` to see the commands without writing anything, and
+`--ref BRANCH` to fetch a channel other than `alpha-0.0.4`.
+
+A pipe (`curl … | bash`) is refused on purpose: the installer asks a question, and a script cannot read an answer
+from its own source.
 
 [distrobox/README.md](distrobox/README.md) explains what is written and what is deliberately left alone — the
 agent's own profiles, keys, transcripts and vault are never touched by an install.
